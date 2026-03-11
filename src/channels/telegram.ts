@@ -206,7 +206,13 @@ export class TelegramChannel implements Channel {
       const isGroup =
         ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
 
-      this.opts.onChatMetadata(chatJid, timestamp, undefined, 'telegram', isGroup);
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        undefined,
+        'telegram',
+        isGroup,
+      );
 
       let content: string;
       try {
@@ -217,7 +223,10 @@ export class TelegramChannel implements Channel {
         const transcript = await transcribeAudio(buffer);
         content = formatTranscript(transcript, caption);
         if (transcript) {
-          logger.info({ chatJid, chars: transcript.length }, 'Transcribed Telegram voice message');
+          logger.info(
+            { chatJid, chars: transcript.length },
+            'Transcribed Telegram voice message',
+          );
         }
       } catch (err) {
         logger.error({ err }, 'Failed to download Telegram voice message');
