@@ -56,7 +56,9 @@ export class TelegramChannel implements Channel {
     try {
       const chatId = jid.replace(/^tg:/, '');
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await this.bot.api.setMessageReaction(Number(chatId), msgId, [{ type: 'emoji', emoji: emoji as any }]);
+      await this.bot.api.setMessageReaction(Number(chatId), msgId, [
+        { type: 'emoji', emoji: emoji as any },
+      ]);
     } catch {
       // silently ignore — reactions may not be available in all chat types
     }
