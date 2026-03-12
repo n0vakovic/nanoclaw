@@ -47,6 +47,20 @@ export class TelegramChannel implements Channel {
   private bot: Bot | null = null;
   private opts: TelegramChannelOpts;
   private botToken: string;
+  private reactionMsgIds = new Map<string, number>();
+
+  private async setReaction(jid: string, emoji: string): Promise<void> {
+    if (!this.bot) return;
+    const msgId = this.reactionMsgIds.get(jid);
+    if (!msgId) return;
+    try {
+      const chatId = jid.replace(/^tg:/, '');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await this.bot.api.setMessageReaction(Number(chatId), msgId, [{ type: 'emoji', emoji: emoji as any }]);
+    } catch {
+      // silently ignore — reactions may not be available in all chat types
+    }
+  }
 
   constructor(botToken: string, opts: TelegramChannelOpts) {
     this.botToken = botToken;
@@ -138,6 +152,10 @@ export class TelegramChannel implements Channel {
         return;
       }
 
+      // Acknowledge with 👀 and track message ID for status reactions
+      this.reactionMsgIds.set(chatJid, ctx.message.message_id);
+      void this.setReaction(chatJid, '👀');
+
       // Deliver message — startMessageLoop() will pick it up
       this.opts.onMessage(chatJid, {
         id: msgId,
@@ -160,6 +178,9 @@ export class TelegramChannel implements Channel {
       const chatJid = `tg:${ctx.chat.id}`;
       const group = this.opts.registeredGroups()[chatJid];
       if (!group) return;
+
+      this.reactionMsgIds.set(chatJid, ctx.message.message_id);
+      void this.setReaction(chatJid, '👀');
 
       const timestamp = new Date(ctx.message.date * 1000).toISOString();
       const senderName =
@@ -214,6 +235,9 @@ export class TelegramChannel implements Channel {
         isGroup,
       );
 
+      this.reactionMsgIds.set(chatJid, ctx.message.message_id);
+      void this.setReaction(chatJid, '👀');
+
       let content: string;
       try {
         const file = await ctx.getFile();
@@ -254,6 +278,42 @@ export class TelegramChannel implements Channel {
     });
     this.bot.on('message:location', (ctx) => storeNonText(ctx, '[Location]'));
     this.bot.on('message:contact', (ctx) => storeNonText(ctx, '[Contact]'));
+
+    // Forward user emoji reactions to the agent as messages
+    this.bot.on('message_reaction', async (ctx) => {
+      const reaction = ctx.messageReaction;
+      const chatJid = `tg:${reaction.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) return;
+
+      // Only forward newly added reactions (ignore removals)
+      const oldEmojis = new Set(
+        (reaction.old_reaction ?? [])
+          .filter((r) => r.type === 'emoji')
+          .map((r) => (r as { type: 'emoji'; emoji: string }).emoji),
+      );
+      const added = (reaction.new_reaction ?? [])
+        .filter((r) => r.type === 'emoji')
+        .map((r) => (r as { type: 'emoji'; emoji: string }).emoji)
+        .filter((e) => !oldEmojis.has(e));
+      if (added.length === 0) return;
+
+      const user = reaction.user;
+      const senderName = user
+        ? user.first_name || user.username || String(user.id)
+        : 'User';
+      const timestamp = new Date(reaction.date * 1000).toISOString();
+
+      this.opts.onMessage(chatJid, {
+        id: `reaction-${reaction.message_id}-${Date.now()}`,
+        chat_jid: chatJid,
+        sender: user?.id.toString() ?? '',
+        sender_name: senderName,
+        content: `@${ASSISTANT_NAME} [User reacted with: ${added.join('')}]`,
+        timestamp,
+        is_from_me: false,
+      });
+    });
 
     // Handle errors gracefully
     this.bot.catch((err) => {
@@ -323,13 +383,16 @@ export class TelegramChannel implements Channel {
   }
 
   async setTyping(jid: string, isTyping: boolean): Promise<void> {
-    if (!this.bot || !isTyping) return;
-    try {
-      const numericId = jid.replace(/^tg:/, '');
-      await this.bot.api.sendChatAction(numericId, 'typing');
-    } catch (err) {
-      logger.debug({ jid, err }, 'Failed to send Telegram typing indicator');
+    if (!this.bot) return;
+    if (isTyping) {
+      try {
+        const numericId = jid.replace(/^tg:/, '');
+        await this.bot.api.sendChatAction(numericId, 'typing');
+      } catch (err) {
+        logger.debug({ jid, err }, 'Failed to send Telegram typing indicator');
+      }
     }
+    void this.setReaction(jid, isTyping ? '🤔' : '👍');
   }
 }
 

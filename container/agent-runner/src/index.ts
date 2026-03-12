@@ -408,7 +408,8 @@ async function runQuery(
         'TeamCreate', 'TeamDelete', 'SendMessage',
         'TodoWrite', 'ToolSearch', 'Skill',
         'NotebookEdit',
-        'mcp__nanoclaw__*'
+        'mcp__nanoclaw__*',
+        'mcp__todoist__*',
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -424,6 +425,13 @@ async function runQuery(
             NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
           },
         },
+        ...(process.env.TODOIST_API_KEY ? {
+          todoist: {
+            command: 'npx',
+            args: ['-y', '@doist/todoist-ai'],
+            env: { TODOIST_API_KEY: process.env.TODOIST_API_KEY },
+          },
+        } : {}),
       },
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
