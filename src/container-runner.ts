@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 
 import {
+  CODING_DIR,
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
@@ -170,6 +171,8 @@ function buildVolumeMounts(
   fs.mkdirSync(path.join(groupIpcDir, 'messages'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
+  fs.mkdirSync(path.join(groupIpcDir, 'actions'), { recursive: true });
+  fs.mkdirSync(path.join(groupIpcDir, 'action-results'), { recursive: true });
   mounts.push({
     hostPath: groupIpcDir,
     containerPath: '/workspace/ipc',
@@ -199,6 +202,24 @@ function buildVolumeMounts(
     containerPath: '/app/src',
     readonly: false,
   });
+
+  // Static read-only mounts: milan's coding repos available to all agents
+  const EXTRA_READONLY_REPOS = [
+    'homotechno-flows',
+    'research',
+    'innernet',
+    'automation',
+  ];
+  for (const dir of EXTRA_READONLY_REPOS) {
+    const hostPath = path.join(CODING_DIR, dir);
+    if (fs.existsSync(hostPath)) {
+      mounts.push({
+        hostPath,
+        containerPath: `/workspace/extra/${dir}`,
+        readonly: true,
+      });
+    }
+  }
 
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {

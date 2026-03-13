@@ -4,6 +4,7 @@ import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 
 import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
+import { dispatchAction, ActionRequest } from './host-actions.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
@@ -143,6 +144,57 @@ export function startIpcWatcher(deps: IpcDeps): void {
         }
       } catch (err) {
         logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
+      }
+
+      // Process host action requests from this group's IPC directory
+      const actionsDir = path.join(ipcBaseDir, sourceGroup, 'actions');
+      const actionResultsDir = path.join(ipcBaseDir, sourceGroup, 'action-results');
+      try {
+        if (fs.existsSync(actionsDir)) {
+          const actionFiles = fs
+            .readdirSync(actionsDir)
+            .filter((f) => f.endsWith('.json'));
+          for (const file of actionFiles) {
+            const filePath = path.join(actionsDir, file);
+            try {
+              const request = JSON.parse(
+                fs.readFileSync(filePath, 'utf-8'),
+              ) as ActionRequest;
+              fs.unlinkSync(filePath);
+              dispatchAction(request)
+                .then((result) => {
+                  fs.mkdirSync(actionResultsDir, { recursive: true });
+                  fs.writeFileSync(
+                    path.join(actionResultsDir, `${result.requestId}.json`),
+                    JSON.stringify(result, null, 2),
+                  );
+                  logger.info(
+                    { requestId: result.requestId, ok: result.ok, sourceGroup },
+                    'Host action completed',
+                  );
+                })
+                .catch((err) => {
+                  logger.error(
+                    { err, request, sourceGroup },
+                    'Host action dispatch error',
+                  );
+                });
+            } catch (err) {
+              logger.error(
+                { file, sourceGroup, err },
+                'Error processing action file',
+              );
+              const errorDir = path.join(ipcBaseDir, 'errors');
+              fs.mkdirSync(errorDir, { recursive: true });
+              fs.renameSync(
+                filePath,
+                path.join(errorDir, `${sourceGroup}-action-${file}`),
+              );
+            }
+          }
+        }
+      } catch (err) {
+        logger.error({ err, sourceGroup }, 'Error reading IPC actions directory');
       }
     }
 
