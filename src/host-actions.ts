@@ -12,6 +12,7 @@ import path from 'path';
 import { promisify } from 'util';
 
 import { CODING_DIR } from './config.js';
+import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 
 const execAsync = promisify(exec);
@@ -19,6 +20,7 @@ const execAsync = promisify(exec);
 export interface ActionRequest {
   action: string;
   requestId: string;
+  params?: Record<string, unknown>;
 }
 
 export interface ActionResult {
@@ -27,7 +29,7 @@ export interface ActionResult {
   output: string;
 }
 
-type ActionHandler = () => Promise<string>;
+type ActionHandler = (params?: Record<string, unknown>) => Promise<string>;
 
 const ACTION_REGISTRY: Record<string, ActionHandler> = {
   /**
@@ -39,7 +41,9 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
     try {
       entries = fs.readdirSync(CODING_DIR);
     } catch (err) {
-      throw new Error(`Cannot read ${CODING_DIR}: ${err instanceof Error ? err.message : String(err)}`);
+      throw new Error(
+        `Cannot read ${CODING_DIR}: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
 
     const repos = entries.filter((f) => {
@@ -75,9 +79,43 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
       ? results.join('\n')
       : `No git repos found in ${CODING_DIR}`;
   },
+
+  /**
+   * Proxy read-only requests to the X (Twitter) API.
+   * Requires X_BEARER_TOKEN env var on the host.
+   * params.endpoint: X API path, e.g. "/2/tweets/search/recent"
+   * params.query: key/value pairs appended as query string
+   */
+  xFetch: async (params) => {
+    const bearerToken =
+      process.env.X_BEARER_TOKEN ||
+      readEnvFile(['X_BEARER_TOKEN']).X_BEARER_TOKEN;
+    if (!bearerToken) throw new Error('X_BEARER_TOKEN not set');
+
+    const { endpoint, query } = params as {
+      endpoint: string;
+      query?: Record<string, string>;
+    };
+    if (!endpoint) throw new Error('xFetch: missing params.endpoint');
+
+    const url = new URL(`https://api.twitter.com${endpoint}`);
+    for (const [k, v] of Object.entries(query ?? {})) {
+      url.searchParams.set(k, v);
+    }
+
+    const res = await fetch(url.toString(), {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${bearerToken}` },
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${text}`);
+    return text;
+  },
 };
 
-export async function dispatchAction(request: ActionRequest): Promise<ActionResult> {
+export async function dispatchAction(
+  request: ActionRequest,
+): Promise<ActionResult> {
   const handler = ACTION_REGISTRY[request.action];
   if (!handler) {
     return {
@@ -88,7 +126,7 @@ export async function dispatchAction(request: ActionRequest): Promise<ActionResu
   }
 
   try {
-    const output = await handler();
+    const output = await handler(request.params);
     return { requestId: request.requestId, ok: true, output };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

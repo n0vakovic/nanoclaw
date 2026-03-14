@@ -148,7 +148,11 @@ export function startIpcWatcher(deps: IpcDeps): void {
 
       // Process host action requests from this group's IPC directory
       const actionsDir = path.join(ipcBaseDir, sourceGroup, 'actions');
-      const actionResultsDir = path.join(ipcBaseDir, sourceGroup, 'action-results');
+      const actionResultsDir = path.join(
+        ipcBaseDir,
+        sourceGroup,
+        'action-results',
+      );
       try {
         if (fs.existsSync(actionsDir)) {
           const actionFiles = fs
@@ -194,7 +198,10 @@ export function startIpcWatcher(deps: IpcDeps): void {
           }
         }
       } catch (err) {
-        logger.error({ err, sourceGroup }, 'Error reading IPC actions directory');
+        logger.error(
+          { err, sourceGroup },
+          'Error reading IPC actions directory',
+        );
       }
     }
 
