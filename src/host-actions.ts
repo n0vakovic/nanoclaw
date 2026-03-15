@@ -81,6 +81,63 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
   },
 
   /**
+   * Convert text to speech via ElevenLabs TTS API.
+   * Returns path to the generated audio file.
+   * params.text: text to synthesize
+   * params.voice_id: ElevenLabs voice ID (falls back to ELEVENLABS_VOICE_ID env)
+   * params.model_id: optional model (defaults to eleven_turbo_v2_5)
+   */
+  ttsSpeak: async (params) => {
+    const envVars = readEnvFile(['ELEVENLABS_API_KEY', 'ELEVENLABS_VOICE_ID']);
+    const apiKey =
+      process.env.ELEVENLABS_API_KEY || envVars.ELEVENLABS_API_KEY;
+    if (!apiKey) throw new Error('ELEVENLABS_API_KEY not set');
+
+    const { text, voice_id, model_id } = params as {
+      text: string;
+      voice_id?: string;
+      model_id?: string;
+    };
+    if (!text) throw new Error('ttsSpeak: missing params.text');
+
+    const voiceId =
+      voice_id ||
+      process.env.ELEVENLABS_VOICE_ID ||
+      envVars.ELEVENLABS_VOICE_ID;
+    if (!voiceId)
+      throw new Error(
+        'ttsSpeak: no voice_id provided and ELEVENLABS_VOICE_ID not set',
+      );
+
+    const res = await fetch(
+      `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
+      {
+        method: 'POST',
+        headers: {
+          'xi-api-key': apiKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          text,
+          model_id: model_id ?? 'eleven_turbo_v2_5',
+          voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+        }),
+      },
+    );
+
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`ElevenLabs ${res.status}: ${body}`);
+    }
+
+    const buffer = Buffer.from(await res.arrayBuffer());
+    const tmpPath = `/tmp/tts-${Date.now()}.mp3`;
+    fs.writeFileSync(tmpPath, buffer);
+    logger.info({ chars: text.length, voiceId, tmpPath }, 'TTS audio generated');
+    return JSON.stringify({ audioPath: tmpPath });
+  },
+
+  /**
    * Proxy read-only requests to the X (Twitter) API.
    * Requires X_BEARER_TOKEN env var on the host.
    * params.endpoint: X API path, e.g. "/2/tweets/search/recent"

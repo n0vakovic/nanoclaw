@@ -1,4 +1,4 @@
-import { Api, Bot } from 'grammy';
+import { Api, Bot, InputFile } from 'grammy';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
@@ -365,6 +365,20 @@ export class TelegramChannel implements Channel {
       logger.info({ jid, length: text.length }, 'Telegram message sent');
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Telegram message');
+    }
+  }
+
+  async sendVoice(jid: string, audioPath: string): Promise<void> {
+    if (!this.bot) {
+      logger.warn('Telegram bot not initialized');
+      return;
+    }
+    try {
+      const numericId = jid.replace(/^tg:/, '');
+      await this.bot.api.sendVoice(numericId, new InputFile(audioPath));
+      logger.info({ jid, audioPath }, 'Telegram voice note sent');
+    } catch (err) {
+      logger.error({ jid, audioPath, err }, 'Failed to send Telegram voice');
     }
   }
 

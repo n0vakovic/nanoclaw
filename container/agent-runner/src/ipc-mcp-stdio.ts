@@ -63,6 +63,67 @@ server.tool(
 );
 
 server.tool(
+  'send_voice_note',
+  'Convert text to speech and send as a voice note to the chat. Use when the user requests voice output or when /voice mode is active. Write naturally for speech — no markdown, no bullet lists, short sentences.',
+  {
+    text: z.string().describe('The text to speak. Write for natural speech — no markdown, no bullets, no headers.'),
+  },
+  async (args) => {
+    const ACTIONS_DIR = path.join(IPC_DIR, 'actions');
+    const RESULTS_DIR = path.join(IPC_DIR, 'action-results');
+    const requestId = `tts-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    // Step 1: Request TTS via host action
+    writeIpcFile(ACTIONS_DIR, {
+      action: 'ttsSpeak',
+      requestId,
+      params: { text: args.text },
+    });
+
+    // Step 2: Poll for result (host processes actions asynchronously)
+    const resultPath = path.join(RESULTS_DIR, `${requestId}.json`);
+    const maxWait = 30_000;
+    const pollInterval = 500;
+    let elapsed = 0;
+
+    while (elapsed < maxWait) {
+      if (fs.existsSync(resultPath)) {
+        const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+        fs.unlinkSync(resultPath);
+
+        if (!result.ok) {
+          return {
+            content: [{ type: 'text' as const, text: `TTS failed: ${result.output}` }],
+            isError: true,
+          };
+        }
+
+        const { audioPath } = JSON.parse(result.output);
+
+        // Step 3: Send voice note via IPC message
+        writeIpcFile(MESSAGES_DIR, {
+          type: 'voice_note',
+          chatJid,
+          audioPath,
+          groupFolder,
+          timestamp: new Date().toISOString(),
+        });
+
+        return { content: [{ type: 'text' as const, text: 'Voice note sent.' }] };
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, pollInterval));
+      elapsed += pollInterval;
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: 'TTS timed out after 30 seconds.' }],
+      isError: true,
+    };
+  },
+);
+
+server.tool(
   'schedule_task',
   `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools. Returns the task ID for future reference. To modify an existing task, use update_task instead.
 

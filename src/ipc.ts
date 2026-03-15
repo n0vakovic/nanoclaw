@@ -13,6 +13,7 @@ import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
+  sendVoice: (jid: string, audioPath: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
@@ -74,13 +75,13 @@ export function startIpcWatcher(deps: IpcDeps): void {
             const filePath = path.join(messagesDir, file);
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              const targetGroup = registeredGroups[data.chatJid];
+              const authorized =
+                isMain ||
+                (targetGroup && targetGroup.folder === sourceGroup);
+
               if (data.type === 'message' && data.chatJid && data.text) {
-                // Authorization: verify this group can send to this chatJid
-                const targetGroup = registeredGroups[data.chatJid];
-                if (
-                  isMain ||
-                  (targetGroup && targetGroup.folder === sourceGroup)
-                ) {
+                if (authorized) {
                   await deps.sendMessage(data.chatJid, data.text);
                   logger.info(
                     { chatJid: data.chatJid, sourceGroup },
@@ -90,6 +91,29 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   logger.warn(
                     { chatJid: data.chatJid, sourceGroup },
                     'Unauthorized IPC message attempt blocked',
+                  );
+                }
+              } else if (
+                data.type === 'voice_note' &&
+                data.chatJid &&
+                data.audioPath
+              ) {
+                if (authorized) {
+                  await deps.sendVoice(data.chatJid, data.audioPath);
+                  // Clean up temp audio file
+                  try {
+                    fs.unlinkSync(data.audioPath);
+                  } catch {
+                    // ignore — file may already be gone
+                  }
+                  logger.info(
+                    { chatJid: data.chatJid, sourceGroup },
+                    'IPC voice note sent',
+                  );
+                } else {
+                  logger.warn(
+                    { chatJid: data.chatJid, sourceGroup },
+                    'Unauthorized IPC voice_note attempt blocked',
                   );
                 }
               }
