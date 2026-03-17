@@ -77,8 +77,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
               const targetGroup = registeredGroups[data.chatJid];
               const authorized =
-                isMain ||
-                (targetGroup && targetGroup.folder === sourceGroup);
+                isMain || (targetGroup && targetGroup.folder === sourceGroup);
 
               if (data.type === 'message' && data.chatJid && data.text) {
                 if (authorized) {

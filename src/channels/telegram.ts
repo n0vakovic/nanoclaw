@@ -1,7 +1,11 @@
+import fs from 'fs';
+import path from 'path';
+
 import { Api, Bot, InputFile } from 'grammy';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
+import { resolveGroupIpcPath } from '../group-folder.js';
 import { logger } from '../logger.js';
 import { transcribeAudio, formatTranscript } from '../transcription.js';
 import { registerChannel, ChannelOpts } from './registry.js';
@@ -212,7 +216,68 @@ export class TelegramChannel implements Channel {
       });
     };
 
-    this.bot.on('message:photo', (ctx) => storeNonText(ctx, '[Photo]'));
+    this.bot.on('message:photo', async (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) return;
+
+      const timestamp = new Date(ctx.message.date * 1000).toISOString();
+      const senderName =
+        ctx.from?.first_name ||
+        ctx.from?.username ||
+        ctx.from?.id?.toString() ||
+        'Unknown';
+      const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
+      const isGroup =
+        ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
+
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        undefined,
+        'telegram',
+        isGroup,
+      );
+      this.reactionMsgIds.set(chatJid, ctx.message.message_id);
+      void this.setReaction(chatJid, '👀');
+
+      let content: string;
+      try {
+        // Grab the largest available size (last element)
+        const photos = ctx.message.photo;
+        const largest = photos[photos.length - 1];
+        const file = await ctx.api.getFile(largest.file_id);
+        const url = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
+        const resp = await fetch(url);
+        const buffer = Buffer.from(await resp.arrayBuffer());
+
+        const ext = path.extname(file.file_path || '').toLowerCase() || '.jpg';
+        const filename = `photo_${ctx.message.message_id}${ext}`;
+        const mediaDir = path.join(resolveGroupIpcPath(group.folder), 'media');
+        fs.mkdirSync(mediaDir, { recursive: true });
+        fs.writeFileSync(path.join(mediaDir, filename), buffer);
+
+        const containerPath = `/workspace/ipc/media/${filename}`;
+        content = `[Photo: ${containerPath}]${caption}\n\nThe image is at ${containerPath} — use Read to view it, then delete it with Bash when done.`;
+        logger.info(
+          { chatJid, filename, bytes: buffer.length },
+          'Saved Telegram photo to IPC media',
+        );
+      } catch (err) {
+        logger.error({ err }, 'Failed to download Telegram photo');
+        content = `[Photo]${caption}`;
+      }
+
+      this.opts.onMessage(chatJid, {
+        id: ctx.message.message_id.toString(),
+        chat_jid: chatJid,
+        sender: ctx.from?.id?.toString() || '',
+        sender_name: senderName,
+        content,
+        timestamp,
+        is_from_me: false,
+      });
+    });
     this.bot.on('message:video', (ctx) => storeNonText(ctx, '[Video]'));
     this.bot.on('message:voice', async (ctx) => {
       const chatJid = `tg:${ctx.chat.id}`;

@@ -89,8 +89,7 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
    */
   ttsSpeak: async (params) => {
     const envVars = readEnvFile(['ELEVENLABS_API_KEY', 'ELEVENLABS_VOICE_ID']);
-    const apiKey =
-      process.env.ELEVENLABS_API_KEY || envVars.ELEVENLABS_API_KEY;
+    const apiKey = process.env.ELEVENLABS_API_KEY || envVars.ELEVENLABS_API_KEY;
     if (!apiKey) throw new Error('ELEVENLABS_API_KEY not set');
 
     const { text, voice_id, model_id } = params as {
@@ -133,7 +132,10 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
     const buffer = Buffer.from(await res.arrayBuffer());
     const tmpPath = `/tmp/tts-${Date.now()}.mp3`;
     fs.writeFileSync(tmpPath, buffer);
-    logger.info({ chars: text.length, voiceId, tmpPath }, 'TTS audio generated');
+    logger.info(
+      { chars: text.length, voiceId, tmpPath },
+      'TTS audio generated',
+    );
     return JSON.stringify({ audioPath: tmpPath });
   },
 
