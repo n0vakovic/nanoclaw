@@ -118,7 +118,7 @@ export type GitHubPermissionTier = 'read' | 'comment' | 'write';
 export interface GitHubRepoPermission {
   /** Repository in "owner/repo" format */
   repo: string;
-  /** Permission tier: read (get/list), comment (+comment), write (+create/close) */
+  /** Permission tier: read (get/list), comment (+comment), write (+create/close/reopen) */
   tier: GitHubPermissionTier;
 }
 

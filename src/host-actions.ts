@@ -39,20 +39,29 @@ type ActionHandler = (params?: Record<string, unknown>) => Promise<string>;
 const TIER_OPS: Record<GitHubPermissionTier, Set<string>> = {
   read: new Set(['get', 'list']),
   comment: new Set(['get', 'list', 'comment']),
-  write: new Set(['get', 'list', 'comment', 'create', 'close']),
+  write: new Set(['get', 'list', 'comment', 'create', 'close', 'reopen']),
 };
 
-let cachedGitHubAllowlist: GitHubAllowlist | null = null;
+const REPO_FORMAT = /^[\w.-]+\/[\w.-]+$/;
+
+let cachedGitHubAllowlist: {
+  data: GitHubAllowlist;
+  mtimeMs: number;
+} | null = null;
 
 function loadGitHubAllowlist(): GitHubAllowlist | null {
-  if (cachedGitHubAllowlist) return cachedGitHubAllowlist;
   try {
+    const stat = fs.statSync(GITHUB_ALLOWLIST_PATH);
+    if (cachedGitHubAllowlist && cachedGitHubAllowlist.mtimeMs === stat.mtimeMs) {
+      return cachedGitHubAllowlist.data;
+    }
     const raw = fs.readFileSync(GITHUB_ALLOWLIST_PATH, 'utf-8');
     const parsed = JSON.parse(raw) as GitHubAllowlist;
     if (!Array.isArray(parsed.repos)) throw new Error('repos must be an array');
-    cachedGitHubAllowlist = parsed;
+    cachedGitHubAllowlist = { data: parsed, mtimeMs: stat.mtimeMs };
     return parsed;
   } catch (err) {
+    cachedGitHubAllowlist = null;
     logger.warn(
       { err, path: GITHUB_ALLOWLIST_PATH },
       'github-allowlist: failed to load',
@@ -62,6 +71,9 @@ function loadGitHubAllowlist(): GitHubAllowlist | null {
 }
 
 function assertGitHubOp(repo: string, op: string): void {
+  if (!REPO_FORMAT.test(repo)) {
+    throw new Error(`Invalid repo format "${repo}" — expected "owner/repo"`);
+  }
   const allowlist = loadGitHubAllowlist();
   if (!allowlist) throw new Error('GitHub allowlist not configured');
   const entry = allowlist.repos.find(
@@ -80,7 +92,7 @@ async function githubApi(
   urlPath: string,
   token: string,
   body?: Record<string, unknown>,
-): Promise<string> {
+): Promise<{ text: string; hasNextPage: boolean }> {
   const res = await fetch(`https://api.github.com${urlPath}`, {
     method,
     headers: {
@@ -93,7 +105,9 @@ async function githubApi(
   });
   const text = await res.text();
   if (!res.ok) throw new Error(`GitHub ${res.status}: ${text}`);
-  return text;
+  const link = res.headers.get('link') || '';
+  const hasNextPage = link.includes('rel="next"');
+  return { text, hasNextPage };
 }
 
 /* ------------------------------------------------------------------ */
@@ -271,13 +285,13 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
    * Requires GITHUB_TOKEN env var on the host.
    * Permissions governed by ~/.config/nanoclaw/github-allowlist.json
    *
-   * params.op: "create" | "get" | "list" | "comment" | "close"
+   * params.op: "create" | "get" | "list" | "comment" | "close" | "reopen"
    * params.repo: "owner/repo"
    * params.title: issue title (create)
    * params.body: issue/comment body (create, comment)
    * params.labels: string[] (create, list filter)
    * params.assignees: string[] (create)
-   * params.issue_number: number (get, comment, close)
+   * params.issue_number: number (get, comment, close, reopen)
    * params.state: "open" | "closed" | "all" (list, default "open")
    */
   githubIssue: async (params) => {
@@ -310,52 +324,85 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
         if (body) payload.body = body;
         if (labels?.length) payload.labels = labels;
         if (assignees?.length) payload.assignees = assignees;
-        return githubApi('POST', `/repos/${repo}/issues`, token, payload);
+        const created = await githubApi(
+          'POST',
+          `/repos/${repo}/issues`,
+          token,
+          payload,
+        );
+        return created.text;
       }
 
       case 'get': {
         if (!issue_number)
           throw new Error('githubIssue get: missing params.issue_number');
-        return githubApi('GET', `/repos/${repo}/issues/${issue_number}`, token);
+        const got = await githubApi(
+          'GET',
+          `/repos/${repo}/issues/${issue_number}`,
+          token,
+        );
+        return got.text;
       }
 
       case 'list': {
         const qs = new URLSearchParams();
         qs.set('state', state || 'open');
+        qs.set('per_page', '100');
         if (labels?.length) qs.set('labels', labels.join(','));
-        return githubApi(
+        const listed = await githubApi(
           'GET',
           `/repos/${repo}/issues?${qs.toString()}`,
           token,
         );
+        if (listed.hasNextPage) {
+          return (
+            listed.text +
+            '\n\n{"_nanoclaw_note":"Showing first 100 results. Use labels or state filters to narrow."}'
+          );
+        }
+        return listed.text;
       }
 
       case 'comment': {
         if (!issue_number)
           throw new Error('githubIssue comment: missing params.issue_number');
         if (!body) throw new Error('githubIssue comment: missing params.body');
-        return githubApi(
+        const commented = await githubApi(
           'POST',
           `/repos/${repo}/issues/${issue_number}/comments`,
           token,
           { body },
         );
+        return commented.text;
       }
 
       case 'close': {
         if (!issue_number)
           throw new Error('githubIssue close: missing params.issue_number');
-        return githubApi(
+        const closed = await githubApi(
           'PATCH',
           `/repos/${repo}/issues/${issue_number}`,
           token,
           { state: 'closed' },
         );
+        return closed.text;
+      }
+
+      case 'reopen': {
+        if (!issue_number)
+          throw new Error('githubIssue reopen: missing params.issue_number');
+        const reopened = await githubApi(
+          'PATCH',
+          `/repos/${repo}/issues/${issue_number}`,
+          token,
+          { state: 'open' },
+        );
+        return reopened.text;
       }
 
       default:
         throw new Error(
-          `githubIssue: unknown op "${op}". Valid: create, get, list, comment, close`,
+          `githubIssue: unknown op "${op}". Valid: create, get, list, comment, close, reopen`,
         );
     }
   },
