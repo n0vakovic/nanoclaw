@@ -142,10 +142,13 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
       }
     }
 
-
     // CoachEx upstream mirror sync (upstream → origin for milan/* branches)
     const coachexRepo = 'CoachEx-Tennis-private';
-    const syncScript = path.join(CODING_DIR, coachexRepo, '.milan/tools/sync_from_upstream.sh');
+    const syncScript = path.join(
+      CODING_DIR,
+      coachexRepo,
+      '.milan/tools/sync_from_upstream.sh',
+    );
     if (repos.includes(coachexRepo) && fs.existsSync(syncScript)) {
       try {
         const { stdout, stderr } = await execAsync(
@@ -154,11 +157,17 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
         );
         const output = (stdout || stderr).trim() || 'ok';
         results.push(`${coachexRepo} (upstream sync): ${output}`);
-        logger.info({ repo: coachexRepo, output }, 'syncRepos: upstream mirror sync');
+        logger.info(
+          { repo: coachexRepo, output },
+          'syncRepos: upstream mirror sync',
+        );
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         results.push(`${coachexRepo} (upstream sync): ERROR - ${msg}`);
-        logger.warn({ repo: coachexRepo, err }, 'syncRepos: upstream mirror sync failed');
+        logger.warn(
+          { repo: coachexRepo, err },
+          'syncRepos: upstream mirror sync failed',
+        );
       }
     }
     return results.length > 0
@@ -273,29 +282,20 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
    */
   githubIssue: async (params) => {
     const token =
-      process.env.GITHUB_TOKEN ||
-      readEnvFile(['GITHUB_TOKEN']).GITHUB_TOKEN;
+      process.env.GITHUB_TOKEN || readEnvFile(['GITHUB_TOKEN']).GITHUB_TOKEN;
     if (!token) throw new Error('GITHUB_TOKEN not set');
 
-    const {
-      op,
-      repo,
-      title,
-      body,
-      labels,
-      assignees,
-      issue_number,
-      state,
-    } = params as {
-      op: string;
-      repo: string;
-      title?: string;
-      body?: string;
-      labels?: string[];
-      assignees?: string[];
-      issue_number?: number;
-      state?: string;
-    };
+    const { op, repo, title, body, labels, assignees, issue_number, state } =
+      params as {
+        op: string;
+        repo: string;
+        title?: string;
+        body?: string;
+        labels?: string[];
+        assignees?: string[];
+        issue_number?: number;
+        state?: string;
+      };
 
     if (!op) throw new Error('githubIssue: missing params.op');
     if (!repo) throw new Error('githubIssue: missing params.repo');
