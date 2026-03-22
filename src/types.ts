@@ -107,3 +107,21 @@ export type OnChatMetadata = (
   channel?: string,
   isGroup?: boolean,
 ) => void;
+
+/**
+ * GitHub Issue Allowlist — per-repo permission tiers.
+ * Stored at ~/.config/nanoclaw/github-allowlist.json
+ * NOT mounted into containers (same security model as other allowlists).
+ */
+export type GitHubPermissionTier = 'read' | 'comment' | 'write';
+
+export interface GitHubRepoPermission {
+  /** Repository in "owner/repo" format */
+  repo: string;
+  /** Permission tier: read (get/list), comment (+comment), write (+create/close) */
+  tier: GitHubPermissionTier;
+}
+
+export interface GitHubAllowlist {
+  repos: GitHubRepoPermission[];
+}

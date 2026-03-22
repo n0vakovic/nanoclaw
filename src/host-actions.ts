@@ -11,9 +11,10 @@ import fs from 'fs';
 import path from 'path';
 import { promisify } from 'util';
 
-import { CODING_DIR } from './config.js';
+import { CODING_DIR, GITHUB_ALLOWLIST_PATH } from './config.js';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
+import { GitHubAllowlist, GitHubPermissionTier } from './types.js';
 
 const execAsync = promisify(exec);
 
@@ -30,6 +31,72 @@ export interface ActionResult {
 }
 
 type ActionHandler = (params?: Record<string, unknown>) => Promise<string>;
+
+/* ------------------------------------------------------------------ */
+/*  GitHub Issue helper utilities                                     */
+/* ------------------------------------------------------------------ */
+
+const TIER_OPS: Record<GitHubPermissionTier, Set<string>> = {
+  read: new Set(['get', 'list']),
+  comment: new Set(['get', 'list', 'comment']),
+  write: new Set(['get', 'list', 'comment', 'create', 'close']),
+};
+
+let cachedGitHubAllowlist: GitHubAllowlist | null = null;
+
+function loadGitHubAllowlist(): GitHubAllowlist | null {
+  if (cachedGitHubAllowlist) return cachedGitHubAllowlist;
+  try {
+    const raw = fs.readFileSync(GITHUB_ALLOWLIST_PATH, 'utf-8');
+    const parsed = JSON.parse(raw) as GitHubAllowlist;
+    if (!Array.isArray(parsed.repos)) throw new Error('repos must be an array');
+    cachedGitHubAllowlist = parsed;
+    return parsed;
+  } catch (err) {
+    logger.warn(
+      { err, path: GITHUB_ALLOWLIST_PATH },
+      'github-allowlist: failed to load',
+    );
+    return null;
+  }
+}
+
+function assertGitHubOp(repo: string, op: string): void {
+  const allowlist = loadGitHubAllowlist();
+  if (!allowlist) throw new Error('GitHub allowlist not configured');
+  const entry = allowlist.repos.find(
+    (r) => r.repo.toLowerCase() === repo.toLowerCase(),
+  );
+  if (!entry) throw new Error(`Repo "${repo}" not in GitHub allowlist`);
+  if (!TIER_OPS[entry.tier]?.has(op)) {
+    throw new Error(
+      `Op "${op}" not allowed for repo "${repo}" (tier: ${entry.tier})`,
+    );
+  }
+}
+
+async function githubApi(
+  method: string,
+  urlPath: string,
+  token: string,
+  body?: Record<string, unknown>,
+): Promise<string> {
+  const res = await fetch(`https://api.github.com${urlPath}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`GitHub ${res.status}: ${text}`);
+  return text;
+}
+
+/* ------------------------------------------------------------------ */
 
 const ACTION_REGISTRY: Record<string, ActionHandler> = {
   /**
@@ -188,6 +255,109 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
     const text = await res.text();
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${text}`);
     return text;
+  },
+
+  /**
+   * Interact with GitHub Issues via the REST API.
+   * Requires GITHUB_TOKEN env var on the host.
+   * Permissions governed by ~/.config/nanoclaw/github-allowlist.json
+   *
+   * params.op: "create" | "get" | "list" | "comment" | "close"
+   * params.repo: "owner/repo"
+   * params.title: issue title (create)
+   * params.body: issue/comment body (create, comment)
+   * params.labels: string[] (create, list filter)
+   * params.assignees: string[] (create)
+   * params.issue_number: number (get, comment, close)
+   * params.state: "open" | "closed" | "all" (list, default "open")
+   */
+  githubIssue: async (params) => {
+    const token =
+      process.env.GITHUB_TOKEN ||
+      readEnvFile(['GITHUB_TOKEN']).GITHUB_TOKEN;
+    if (!token) throw new Error('GITHUB_TOKEN not set');
+
+    const {
+      op,
+      repo,
+      title,
+      body,
+      labels,
+      assignees,
+      issue_number,
+      state,
+    } = params as {
+      op: string;
+      repo: string;
+      title?: string;
+      body?: string;
+      labels?: string[];
+      assignees?: string[];
+      issue_number?: number;
+      state?: string;
+    };
+
+    if (!op) throw new Error('githubIssue: missing params.op');
+    if (!repo) throw new Error('githubIssue: missing params.repo');
+
+    // Enforce allowlist
+    assertGitHubOp(repo, op);
+
+    switch (op) {
+      case 'create': {
+        if (!title) throw new Error('githubIssue create: missing params.title');
+        const payload: Record<string, unknown> = { title };
+        if (body) payload.body = body;
+        if (labels?.length) payload.labels = labels;
+        if (assignees?.length) payload.assignees = assignees;
+        return githubApi('POST', `/repos/${repo}/issues`, token, payload);
+      }
+
+      case 'get': {
+        if (!issue_number)
+          throw new Error('githubIssue get: missing params.issue_number');
+        return githubApi('GET', `/repos/${repo}/issues/${issue_number}`, token);
+      }
+
+      case 'list': {
+        const qs = new URLSearchParams();
+        qs.set('state', state || 'open');
+        if (labels?.length) qs.set('labels', labels.join(','));
+        return githubApi(
+          'GET',
+          `/repos/${repo}/issues?${qs.toString()}`,
+          token,
+        );
+      }
+
+      case 'comment': {
+        if (!issue_number)
+          throw new Error('githubIssue comment: missing params.issue_number');
+        if (!body) throw new Error('githubIssue comment: missing params.body');
+        return githubApi(
+          'POST',
+          `/repos/${repo}/issues/${issue_number}/comments`,
+          token,
+          { body },
+        );
+      }
+
+      case 'close': {
+        if (!issue_number)
+          throw new Error('githubIssue close: missing params.issue_number');
+        return githubApi(
+          'PATCH',
+          `/repos/${repo}/issues/${issue_number}`,
+          token,
+          { state: 'closed' },
+        );
+      }
+
+      default:
+        throw new Error(
+          `githubIssue: unknown op "${op}". Valid: create, get, list, comment, close`,
+        );
+    }
   },
 };
 
