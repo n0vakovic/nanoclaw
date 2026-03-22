@@ -75,6 +75,25 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
       }
     }
 
+
+    // CoachEx upstream mirror sync (upstream → origin for milan/* branches)
+    const coachexRepo = 'CoachEx-Tennis-private';
+    const syncScript = path.join(CODING_DIR, coachexRepo, '.milan/tools/sync_from_upstream.sh');
+    if (repos.includes(coachexRepo) && fs.existsSync(syncScript)) {
+      try {
+        const { stdout, stderr } = await execAsync(
+          `bash .milan/tools/sync_from_upstream.sh --filter "milan/" --allow-dirty`,
+          { cwd: path.join(CODING_DIR, coachexRepo), timeout: 120000 },
+        );
+        const output = (stdout || stderr).trim() || 'ok';
+        results.push(`${coachexRepo} (upstream sync): ${output}`);
+        logger.info({ repo: coachexRepo, output }, 'syncRepos: upstream mirror sync');
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        results.push(`${coachexRepo} (upstream sync): ERROR - ${msg}`);
+        logger.warn({ repo: coachexRepo, err }, 'syncRepos: upstream mirror sync failed');
+      }
+    }
     return results.length > 0
       ? results.join('\n')
       : `No git repos found in ${CODING_DIR}`;
