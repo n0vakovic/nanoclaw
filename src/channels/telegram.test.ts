@@ -657,7 +657,25 @@ describe('TelegramChannel', () => {
       );
     });
 
-    it('stores location with placeholder', async () => {
+    it('stores location with coordinates', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createMediaCtx({
+        extra: { location: { latitude: 38.7169, longitude: -9.1333 } },
+      });
+      await triggerMediaMessage('message:location', ctx);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({
+          content: '[Location: 38.7169,-9.1333]',
+        }),
+      );
+    });
+
+    it('stores location without coordinates as fallback', async () => {
       const opts = createTestOpts();
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();

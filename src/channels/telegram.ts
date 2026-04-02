@@ -343,7 +343,13 @@ export class TelegramChannel implements Channel {
       const emoji = ctx.message.sticker?.emoji || '';
       storeNonText(ctx, `[Sticker ${emoji}]`);
     });
-    this.bot.on('message:location', (ctx) => storeNonText(ctx, '[Location]'));
+    this.bot.on('message:location', (ctx) => {
+      const loc = ctx.message.location;
+      const tag = loc
+        ? `[Location: ${loc.latitude},${loc.longitude}]`
+        : '[Location]';
+      storeNonText(ctx, tag);
+    });
     this.bot.on('message:contact', (ctx) => storeNonText(ctx, '[Contact]'));
 
     // Forward user emoji reactions to the agent as messages

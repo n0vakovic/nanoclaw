@@ -406,6 +406,92 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
         );
     }
   },
+
+  /**
+   * Search for nearby places via the Foursquare Places API.
+   * Requires FOURSQUARE_API_KEY env var on the host.
+   *
+   * params.lat: latitude
+   * params.lng: longitude
+   * params.query: search term (e.g. "restaurants", "coffee")
+   * params.radius: search radius in meters (default 500, max 100000)
+   * params.limit: max results (default 5, max 50)
+   */
+  placesSearch: async (params) => {
+    const apiKey =
+      process.env.FOURSQUARE_API_KEY ||
+      readEnvFile(['FOURSQUARE_API_KEY']).FOURSQUARE_API_KEY;
+    if (!apiKey) throw new Error('FOURSQUARE_API_KEY not set');
+
+    const { lat, lng, query, radius, limit } = params as {
+      lat: number;
+      lng: number;
+      query?: string;
+      radius?: number;
+      limit?: number;
+    };
+
+    if (lat == null || lng == null) {
+      throw new Error('placesSearch: missing params.lat and/or params.lng');
+    }
+
+    const url = new URL('https://places-api.foursquare.com/places/search');
+    url.searchParams.set('ll', `${lat},${lng}`);
+    if (query) url.searchParams.set('query', query);
+    url.searchParams.set('radius', String(Math.min(radius || 500, 100000)));
+    url.searchParams.set('limit', String(Math.min(limit || 5, 50)));
+
+    const res = await fetch(url.toString(), {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        Accept: 'application/json',
+        'X-Places-Api-Version': '2025-06-17',
+      },
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`Foursquare ${res.status}: ${body}`);
+    }
+
+    const data = (await res.json()) as {
+      results: Array<{
+        name: string;
+        latitude?: number;
+        longitude?: number;
+        location: {
+          formatted_address?: string;
+          address?: string;
+          locality?: string;
+          country?: string;
+        };
+        categories?: Array<{ name: string }>;
+      }>;
+    };
+
+    const places = data.results.map((p) => {
+      const mapsLink =
+        p.latitude != null && p.longitude != null
+          ? `https://maps.google.com/?q=${p.latitude},${p.longitude}`
+          : null;
+      return {
+        name: p.name,
+        address:
+          p.location.formatted_address ||
+          p.location.address ||
+          `${p.location.locality || ''}, ${p.location.country || ''}`.trim(),
+        categories: (p.categories || []).map((c) => c.name),
+        mapsLink,
+      };
+    });
+
+    logger.info(
+      { lat, lng, query, resultCount: places.length },
+      'placesSearch completed',
+    );
+    return JSON.stringify(places);
+  },
 };
 
 export async function dispatchAction(
