@@ -52,7 +52,10 @@ let cachedGitHubAllowlist: {
 function loadGitHubAllowlist(): GitHubAllowlist | null {
   try {
     const stat = fs.statSync(GITHUB_ALLOWLIST_PATH);
-    if (cachedGitHubAllowlist && cachedGitHubAllowlist.mtimeMs === stat.mtimeMs) {
+    if (
+      cachedGitHubAllowlist &&
+      cachedGitHubAllowlist.mtimeMs === stat.mtimeMs
+    ) {
       return cachedGitHubAllowlist.data;
     }
     const raw = fs.readFileSync(GITHUB_ALLOWLIST_PATH, 'utf-8');
