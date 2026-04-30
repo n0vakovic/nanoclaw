@@ -1,15 +1,9 @@
 name: Sync upstream & merge-forward skill branches
 
 on:
-  # Triggered by upstream repo via repository_dispatch
-  repository_dispatch:
-    types: [upstream-main-updated]
-  # Fallback: run on schedule in case dispatch isn't configured
-  schedule:
-    - cron: '0 */6 * * *'  # every 6 hours
-  # Also run when fork's main is pushed directly
-  push:
-    branches: [main]
+  # Disabled: upstream qwibitai/nanoclaw is a v2 rewrite that cannot
+  # be merged into this v1 fork. Migration is manual (see docs).
+  # Re-enable schedule/push/repository_dispatch only after migrating to v2.
   workflow_dispatch:
 
 permissions:
