@@ -28,8 +28,8 @@ export type SyncVerb = 'snapshot' | 'append' | 'write';
 export interface SyncFile {
   sourceAbs: string;
   repo: string;
-  relPath: string;       // path inside the repo
-  fullRelPath: string;   // <repo>/<relPath>, used for filter matching
+  relPath: string; // path inside the repo
+  fullRelPath: string; // <repo>/<relPath>, used for filter matching
   mtimeMs: number;
 }
 
@@ -236,8 +236,7 @@ export async function runSyncRepos(
   const now = new Date();
   const nowIso = now.toISOString();
   // YYYYMMDD and YYYYMMDDTHHMMSS from ISO YYYY-MM-DDTHH:MM:SS.sssZ
-  const nowDate =
-    nowIso.slice(0, 4) + nowIso.slice(5, 7) + nowIso.slice(8, 10);
+  const nowDate = nowIso.slice(0, 4) + nowIso.slice(5, 7) + nowIso.slice(8, 10);
   const nowTs =
     nowDate +
     'T' +
@@ -333,7 +332,7 @@ export async function runSyncRepos(
         await execFileAsync('git', ['add', '--', targetRelPath], { cwd });
         await execFileAsync(
           'git',
-          ['commit', '-m', `${verb}: ${targetRelPath}`],
+          ['commit', '-m', `damrassbot sync: ${verb} ${targetRelPath}`],
           { cwd },
         );
         committedSources.push(f.sourceAbs);
@@ -368,9 +367,7 @@ export async function runSyncRepos(
           }
         }
       } catch (err) {
-        repoLines.push(
-          `push ERROR - ${errMsg(err)} (sources kept for retry)`,
-        );
+        repoLines.push(`push ERROR - ${errMsg(err)} (sources kept for retry)`);
         logger.warn({ repo, err }, 'syncRepos: git push failed');
       }
     }

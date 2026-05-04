@@ -8,9 +8,10 @@ const noExists = () => false;
 
 describe('pickVerb — non-fragments paths', () => {
   it('plain .md outside fragments → write', () => {
-    expect(
-      pickVerb('concepts/foo.md', NOW_DATE, NOW_TS, noExists),
-    ).toEqual({ verb: 'write', targetRelPath: 'concepts/foo.md' });
+    expect(pickVerb('concepts/foo.md', NOW_DATE, NOW_TS, noExists)).toEqual({
+      verb: 'write',
+      targetRelPath: 'concepts/foo.md',
+    });
   });
 
   it('plain .md at the root of a repo → write', () => {
@@ -84,8 +85,7 @@ describe('pickVerb — fragments snapshots', () => {
       ),
     ).toEqual({
       verb: 'snapshot',
-      targetRelPath:
-        'fragments/software-2.0/software-2.0.20260406.091234.md',
+      targetRelPath: 'fragments/software-2.0/software-2.0.20260406.091234.md',
     });
   });
 
