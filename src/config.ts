@@ -20,6 +20,7 @@ export const SCHEDULER_POLL_INTERVAL = 60000;
 const PROJECT_ROOT = process.cwd();
 export const HOME_DIR = process.env.HOME || os.homedir();
 export const CODING_DIR = path.join(HOME_DIR, 'coding');
+export const SYNC_DIR = path.join(HOME_DIR, 'damrassbot', 'sync');
 
 // Mount security: allowlist stored OUTSIDE project root, never mounted into containers
 export const MOUNT_ALLOWLIST_PATH = path.join(

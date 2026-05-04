@@ -6,17 +6,13 @@
  * the result back to action-results/. The registry is the sole security boundary:
  * if it's not here, it cannot be triggered.
  */
-import { exec } from 'child_process';
 import fs from 'fs';
-import path from 'path';
-import { promisify } from 'util';
 
-import { CODING_DIR, GITHUB_ALLOWLIST_PATH } from './config.js';
+import { GITHUB_ALLOWLIST_PATH } from './config.js';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
+import { runSyncRepos } from './sync-action.js';
 import { GitHubAllowlist, GitHubPermissionTier } from './types.js';
-
-const execAsync = promisify(exec);
 
 export interface ActionRequest {
   action: string;
@@ -117,80 +113,13 @@ async function githubApi(
 
 const ACTION_REGISTRY: Record<string, ActionHandler> = {
   /**
-   * git pull every repo in ~/coding, excluding _third_party.
-   * Skips directories that aren't git repos.
+   * Bidirectional sync between ~/coding and ~/damrassbot/sync.
+   * Inbound: git pull every repo (skipping _third_party).
+   * Outbound: route files staged in sync/<repo>/<path> into the repo
+   *   (WRITE / APPEND / SNAPSHOT depending on path + suffix), commit, push,
+   *   delete the source. Optional params.filter (regex) scopes the run.
    */
-  syncRepos: async () => {
-    let entries: string[];
-    try {
-      entries = fs.readdirSync(CODING_DIR);
-    } catch (err) {
-      throw new Error(
-        `Cannot read ${CODING_DIR}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-
-    const repos = entries.filter((f) => {
-      if (f === '_third_party') return false;
-      const fullPath = path.join(CODING_DIR, f);
-      try {
-        return (
-          fs.statSync(fullPath).isDirectory() &&
-          fs.existsSync(path.join(fullPath, '.git'))
-        );
-      } catch {
-        return false;
-      }
-    });
-
-    const results: string[] = [];
-    for (const repo of repos) {
-      try {
-        const { stdout, stderr } = await execAsync('git pull', {
-          cwd: path.join(CODING_DIR, repo),
-        });
-        const output = (stdout || stderr).trim() || 'ok';
-        results.push(`${repo}: ${output}`);
-        logger.info({ repo, output }, 'syncRepos: git pull');
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        results.push(`${repo}: ERROR - ${msg}`);
-        logger.warn({ repo, err }, 'syncRepos: git pull failed');
-      }
-    }
-
-    // CoachEx upstream mirror sync (upstream → origin for milan/* branches)
-    const coachexRepo = 'CoachEx-Tennis-private';
-    const syncScript = path.join(
-      CODING_DIR,
-      coachexRepo,
-      '.milan/tools/sync_from_upstream.sh',
-    );
-    if (repos.includes(coachexRepo) && fs.existsSync(syncScript)) {
-      try {
-        const { stdout, stderr } = await execAsync(
-          `bash .milan/tools/sync_from_upstream.sh --filter "milan/" --allow-dirty`,
-          { cwd: path.join(CODING_DIR, coachexRepo), timeout: 120000 },
-        );
-        const output = (stdout || stderr).trim() || 'ok';
-        results.push(`${coachexRepo} (upstream sync): ${output}`);
-        logger.info(
-          { repo: coachexRepo, output },
-          'syncRepos: upstream mirror sync',
-        );
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        results.push(`${coachexRepo} (upstream sync): ERROR - ${msg}`);
-        logger.warn(
-          { repo: coachexRepo, err },
-          'syncRepos: upstream mirror sync failed',
-        );
-      }
-    }
-    return results.length > 0
-      ? results.join('\n')
-      : `No git repos found in ${CODING_DIR}`;
-  },
+  syncRepos: async (params) => runSyncRepos(params),
 
   /**
    * Convert text to speech via ElevenLabs TTS API.
