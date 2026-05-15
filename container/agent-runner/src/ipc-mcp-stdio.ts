@@ -64,9 +64,20 @@ server.tool(
 
 server.tool(
   'send_voice_note',
-  'Convert text to speech and send as a voice note to the chat. Use when the user requests voice output or when /voice mode is active. Write naturally for speech — no markdown, no bullet lists, short sentences.',
+  'Convert text to speech and send as a voice note to the chat. Use when the user requests voice output or when /voice mode is active. Write naturally for speech — no markdown, no bullet lists, short sentences. Optional `voice` param picks a non-default voice (see param description).',
   {
     text: z.string().describe('The text to speak. Write for natural speech — no markdown, no bullets, no headers.'),
+    voice: z
+      .enum(['lucy', 'funny-nigerian', 'indian', 'vlad'])
+      .optional()
+      .describe(
+        'Optional named voice. Omit for default. Options: ' +
+          '"lucy" (British, energetic — good for upbeat or playful lines); ' +
+          '"funny-nigerian" (Nigerian accent, slow and comedic — good for jokes or character bits); ' +
+          '"indian" (Indian accent, energetic — good for animated delivery); ' +
+          '"vlad" (Russian accent — good for deadpan or dramatic lines). ' +
+          'Pick to match tone; default voice is fine for normal replies.',
+      ),
   },
   async (args) => {
     const ACTIONS_DIR = path.join(IPC_DIR, 'actions');
@@ -77,7 +88,7 @@ server.tool(
     writeIpcFile(ACTIONS_DIR, {
       action: 'ttsSpeak',
       requestId,
-      params: { text: args.text },
+      params: { text: args.text, ...(args.voice ? { voice: args.voice } : {}) },
     });
 
     // Step 2: Poll for result (host processes actions asynchronously)

@@ -125,28 +125,45 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
    * Convert text to speech via ElevenLabs TTS API.
    * Returns path to the generated audio file.
    * params.text: text to synthesize
-   * params.voice_id: ElevenLabs voice ID (falls back to ELEVENLABS_VOICE_ID env)
+   * params.voice_id: ElevenLabs voice ID (explicit; highest priority)
+   * params.voice: named voice from VOICES map (e.g. 'lucy', 'vlad')
    * params.model_id: optional model (defaults to eleven_turbo_v2_5)
+   * Resolution: voice_id > VOICES[voice] > ELEVENLABS_VOICE_ID env
    */
   ttsSpeak: async (params) => {
+    const VOICES: Record<string, string> = {
+      lucy: 'lcMyyd2HUfFzxdCaC4Ta',
+      'funny-nigerian': 'ji8V21dyEPg5du75d9nX',
+      indian: 'T8lgQl6x5PSdhmmWx42m',
+      vlad: 'XjdmlV0OFXfXE6Mg2Sb7',
+    };
+
     const envVars = readEnvFile(['ELEVENLABS_API_KEY', 'ELEVENLABS_VOICE_ID']);
     const apiKey = process.env.ELEVENLABS_API_KEY || envVars.ELEVENLABS_API_KEY;
     if (!apiKey) throw new Error('ELEVENLABS_API_KEY not set');
 
-    const { text, voice_id, model_id } = params as {
+    const { text, voice_id, voice, model_id } = params as {
       text: string;
       voice_id?: string;
+      voice?: string;
       model_id?: string;
     };
     if (!text) throw new Error('ttsSpeak: missing params.text');
 
+    if (voice && !VOICES[voice]) {
+      throw new Error(
+        `ttsSpeak: unknown voice name '${voice}'. Known: ${Object.keys(VOICES).join(', ')}`,
+      );
+    }
+
     const voiceId =
       voice_id ||
+      (voice ? VOICES[voice] : undefined) ||
       process.env.ELEVENLABS_VOICE_ID ||
       envVars.ELEVENLABS_VOICE_ID;
     if (!voiceId)
       throw new Error(
-        'ttsSpeak: no voice_id provided and ELEVENLABS_VOICE_ID not set',
+        'ttsSpeak: no voice_id/voice provided and ELEVENLABS_VOICE_ID not set',
       );
 
     const res = await fetch(
