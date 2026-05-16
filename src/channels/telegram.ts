@@ -45,6 +45,52 @@ async function sendTelegramMessage(
   }
 }
 
+/**
+ * Build a <reply_to> wrapper around `body` when the inbound Telegram message
+ * is a reply to a previous one. Returns `body` unchanged if no reply context.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function wrapReplyContext(replyTo: any, body: string): string {
+  if (!replyTo) return body;
+
+  let quoted: string;
+  if (typeof replyTo.text === 'string' && replyTo.text.length > 0) {
+    quoted = replyTo.text;
+  } else if (
+    typeof replyTo.caption === 'string' &&
+    replyTo.caption.length > 0
+  ) {
+    quoted = replyTo.caption;
+  } else if (replyTo.voice) {
+    quoted = '[voice]';
+  } else if (replyTo.photo) {
+    quoted = '[photo]';
+  } else if (replyTo.audio) {
+    quoted = '[audio]';
+  } else if (replyTo.video) {
+    quoted = '[video]';
+  } else if (replyTo.document) {
+    quoted = '[document]';
+  } else if (replyTo.sticker) {
+    quoted = '[sticker]';
+  } else {
+    quoted = '[message]';
+  }
+
+  if (quoted.length > 200) {
+    quoted = quoted.slice(0, 200) + '…';
+  }
+  // Escape for safe embedding in the XML-style wrapper attribute
+  const escaped = quoted
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/"/g, '&quot;');
+
+  const senderRole = replyTo.from?.is_bot ? 'bot' : 'user';
+
+  return `<reply_to sender="${senderRole}" text="${escaped}">\n${body}\n</reply_to>`;
+}
+
 export class TelegramChannel implements Channel {
   name = 'telegram';
 
@@ -137,6 +183,12 @@ export class TelegramChannel implements Channel {
         }
       }
 
+      // If this is a reply to another message, surface that context to the agent
+      content = wrapReplyContext(
+        (ctx.message as any).reply_to_message,
+        content,
+      );
+
       // Store chat metadata for discovery
       const isGroup =
         ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
@@ -205,12 +257,16 @@ export class TelegramChannel implements Channel {
         'telegram',
         isGroup,
       );
+      const content = wrapReplyContext(
+        ctx.message.reply_to_message,
+        `${placeholder}${caption}`,
+      );
       this.opts.onMessage(chatJid, {
         id: ctx.message.message_id.toString(),
         chat_jid: chatJid,
         sender: ctx.from?.id?.toString() || '',
         sender_name: senderName,
-        content: `${placeholder}${caption}`,
+        content,
         timestamp,
         is_from_me: false,
       });
@@ -268,6 +324,11 @@ export class TelegramChannel implements Channel {
         content = `[Photo]${caption}`;
       }
 
+      content = wrapReplyContext(
+        (ctx.message as any).reply_to_message,
+        content,
+      );
+
       this.opts.onMessage(chatJid, {
         id: ctx.message.message_id.toString(),
         chat_jid: chatJid,
@@ -323,6 +384,11 @@ export class TelegramChannel implements Channel {
         logger.error({ err }, 'Failed to download Telegram voice message');
         content = formatTranscript(null, caption);
       }
+
+      content = wrapReplyContext(
+        (ctx.message as any).reply_to_message,
+        content,
+      );
 
       this.opts.onMessage(chatJid, {
         id: ctx.message.message_id.toString(),

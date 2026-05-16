@@ -501,8 +501,12 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
    *   (otherwise basename of filePath is used)
    */
   gistCreate: async (params, ctx) => {
-    const { filePath, public: isPublic, description, filename } = (params ||
-      {}) as {
+    const {
+      filePath,
+      public: isPublic,
+      description,
+      filename,
+    } = (params || {}) as {
       filePath?: string;
       public?: boolean;
       description?: string;
@@ -536,7 +540,9 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
       .filter(Boolean)
       .pop();
     if (!url || !/^https:\/\/gist\.github\.com\//.test(url)) {
-      throw new Error(`gistCreate: could not parse gist URL from output: ${stdout}`);
+      throw new Error(
+        `gistCreate: could not parse gist URL from output: ${stdout}`,
+      );
     }
     logger.info(
       { url, public: !!isPublic, sourceGroup: ctx.sourceGroup },
