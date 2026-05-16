@@ -1,8 +1,32 @@
 import OpenAI from 'openai';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
+import { PAUSE_THRESHOLD_S, LONG_PAUSE_THRESHOLD_S } from './config.js';
 
 const FALLBACK = '[Voice message — transcription unavailable]';
+
+type WhisperWord = { word: string; start: number; end: number };
+
+// Reconstruct transcript from word-level timestamps, injecting [pause] / [long pause]
+// markers for mid-sentence gaps. Pauses immediately after sentence-ending
+// punctuation (. ? !) are suppressed — those are natural sentence breaks, not
+// hesitation.
+function renderWithPauses(words: WhisperWord[]): string {
+  if (!words.length) return '';
+  const parts: string[] = [words[0].word];
+  for (let i = 0; i < words.length - 1; i++) {
+    const gap = words[i + 1].start - words[i].end;
+    const prev = words[i].word.replace(/["'’”)\]\s]+$/, '');
+    const endsSentence = /[.?!]$/.test(prev);
+    let marker = '';
+    if (!endsSentence) {
+      if (gap >= LONG_PAUSE_THRESHOLD_S) marker = ' [long pause]';
+      else if (gap >= PAUSE_THRESHOLD_S) marker = ' [pause]';
+    }
+    parts.push(`${marker} ${words[i + 1].word}`);
+  }
+  return parts.join('').replace(/\s+/g, ' ').trim();
+}
 
 export async function transcribeAudio(
   audioBuffer: Buffer,
@@ -22,7 +46,14 @@ export async function transcribeAudio(
     const result = await openai.audio.transcriptions.create({
       model: 'whisper-1',
       file,
+      response_format: 'verbose_json',
+      timestamp_granularities: ['word'],
     });
+    const words = result.words;
+    if (words && words.length > 0) {
+      const rendered = renderWithPauses(words as WhisperWord[]);
+      if (rendered) return rendered;
+    }
     return result.text || null;
   } catch (err) {
     logger.error({ err }, 'Whisper transcription failed');

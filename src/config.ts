@@ -14,6 +14,13 @@ export const ASSISTANT_HAS_OWN_NUMBER =
   (process.env.ASSISTANT_HAS_OWN_NUMBER ||
     envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
 export const POLL_INTERVAL = 2000;
+
+// Voice transcription pause thresholds (seconds).
+// Gaps between adjacent words longer than these get marked as [pause] / [long pause]
+// in the rendered transcript, to surface mid-sentence hesitation. Pauses after
+// sentence-ending punctuation are suppressed since those are natural.
+export const PAUSE_THRESHOLD_S = 1.0;
+export const LONG_PAUSE_THRESHOLD_S = 2.0;
 export const SCHEDULER_POLL_INTERVAL = 60000;
 
 // Absolute paths needed for container mounts
