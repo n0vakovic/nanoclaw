@@ -134,6 +134,136 @@ server.tool(
   },
 );
 
+/**
+ * Send a pre-existing audio file as a Telegram audio (music-track UX with
+ * optional title/performer metadata). For longer audio like podcasts or
+ * stitched multi-voice output. For a single TTS line, use send_voice_note.
+ *
+ * The file must be at a /workspace/ipc/media/ path — copy or move your
+ * output there before calling. After sending, the host deletes the file.
+ */
+server.tool(
+  'send_audio_file',
+  'Send a pre-existing audio file as a Telegram audio track. Use for longer audio (podcasts, stitched output, music) — gets the music-player UX with optional title/performer. For a single TTS line, use send_voice_note instead. The file must live at /workspace/ipc/media/<name>.mp3; copy or move your output there first. After sending, the host deletes the file.',
+  {
+    audioPath: z
+      .string()
+      .describe('Container path under /workspace/ipc/media/ (e.g. "/workspace/ipc/media/podcast.mp3")'),
+    title: z.string().optional().describe('Track title shown in Telegram audio player'),
+    performer: z.string().optional().describe('Performer/artist shown in audio player'),
+    caption: z.string().optional().describe('Optional caption text shown below the audio'),
+  },
+  async (args) => {
+    writeIpcFile(MESSAGES_DIR, {
+      type: 'audio_file',
+      chatJid,
+      audioPath: args.audioPath,
+      title: args.title,
+      performer: args.performer,
+      caption: args.caption,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+    return { content: [{ type: 'text' as const, text: 'Audio file queued for send.' }] };
+  },
+);
+
+/**
+ * Send a pre-existing file as a Telegram document (generic file attachment).
+ * Same /workspace/ipc/media/ staging rule as send_audio_file.
+ */
+server.tool(
+  'send_document',
+  'Send a pre-existing file as a Telegram document (generic file attachment — .md, .pdf, .txt, .json, etc.). The file must live at /workspace/ipc/media/<name>.<ext>; copy or move it there first. After sending, the host deletes the file. Telegram does not render markdown inline — the recipient opens the file in their OS app.',
+  {
+    filePath: z
+      .string()
+      .describe('Container path under /workspace/ipc/media/ (e.g. "/workspace/ipc/media/report.md")'),
+    caption: z.string().optional().describe('Optional caption text shown below the document'),
+  },
+  async (args) => {
+    writeIpcFile(MESSAGES_DIR, {
+      type: 'document',
+      chatJid,
+      filePath: args.filePath,
+      caption: args.caption,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+    return { content: [{ type: 'text' as const, text: 'Document queued for send.' }] };
+  },
+);
+
+/**
+ * Create a GitHub gist from a staged file. Returns the gist URL. By default
+ * the gist is "secret" (unlisted but accessible to anyone with the URL).
+ * Set public: true for a listed/searchable public gist. Promote secret→public
+ * later via `gh gist edit <id> --public` or the GitHub web UI.
+ */
+server.tool(
+  'create_gist',
+  'Create a GitHub gist from a staged file and return its URL. Use for sharing long-form text/markdown that would be cumbersome inline. Default is "secret" gist (unlisted; anyone with the URL can read, does not show in your gist list). Set public:true for a fully public gist. File must be at /workspace/ipc/media/<name>. After creation, the staged file is removed. Returns JSON: {"url": "https://gist.github.com/..."}. Send the URL to the user via send_message.',
+  {
+    filePath: z
+      .string()
+      .describe('Container path under /workspace/ipc/media/ (e.g. "/workspace/ipc/media/notes.md")'),
+    public: z.boolean().optional().describe('false (default) = secret/unlisted; true = public/listed'),
+    description: z.string().optional().describe('Gist description (shown on the gist page)'),
+    filename: z.string().optional().describe('Override filename inside the gist (otherwise basename of filePath)'),
+  },
+  async (args) => {
+    const ACTIONS_DIR = path.join(IPC_DIR, 'actions');
+    const RESULTS_DIR = path.join(IPC_DIR, 'action-results');
+    const requestId = `gist-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    writeIpcFile(ACTIONS_DIR, {
+      action: 'gistCreate',
+      requestId,
+      params: {
+        filePath: args.filePath,
+        public: args.public,
+        description: args.description,
+        filename: args.filename,
+      },
+    });
+
+    const resultPath = path.join(RESULTS_DIR, `${requestId}.json`);
+    const maxWait = 30_000;
+    const pollInterval = 500;
+    let elapsed = 0;
+
+    while (elapsed < maxWait) {
+      if (fs.existsSync(resultPath)) {
+        const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+        fs.unlinkSync(resultPath);
+
+        if (!result.ok) {
+          return {
+            content: [{ type: 'text' as const, text: `Gist create failed: ${result.output}` }],
+            isError: true,
+          };
+        }
+
+        const { url } = JSON.parse(result.output);
+        // Remove the staged file so it doesn't accumulate in /workspace/ipc/media/
+        try {
+          fs.unlinkSync(args.filePath);
+        } catch {
+          // ignore
+        }
+        return { content: [{ type: 'text' as const, text: url }] };
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollInterval));
+      elapsed += pollInterval;
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: 'Gist creation timed out after 30 seconds.' }],
+      isError: true,
+    };
+  },
+);
+
 server.tool(
   'schedule_task',
   `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools. Returns the task ID for future reference. To modify an existing task, use update_task instead.

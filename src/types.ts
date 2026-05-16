@@ -90,6 +90,18 @@ export interface Channel {
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
   // Optional: send a voice/audio file. Channels that support it implement it.
   sendVoice?(jid: string, audioPath: string): Promise<void>;
+  // Optional: send an audio file with music-track UX (title, performer).
+  sendAudio?(
+    jid: string,
+    audioPath: string,
+    meta?: { title?: string; performer?: string; caption?: string },
+  ): Promise<void>;
+  // Optional: send a generic document/file.
+  sendDocument?(
+    jid: string,
+    filePath: string,
+    meta?: { caption?: string },
+  ): Promise<void>;
   // Optional: sync group/chat names from the platform.
   syncGroups?(force: boolean): Promise<void>;
 }

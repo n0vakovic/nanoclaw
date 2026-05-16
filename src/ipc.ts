@@ -14,6 +14,16 @@ import { RegisteredGroup } from './types.js';
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
   sendVoice: (jid: string, audioPath: string) => Promise<void>;
+  sendAudio: (
+    jid: string,
+    audioPath: string,
+    meta?: { title?: string; performer?: string; caption?: string },
+  ) => Promise<void>;
+  sendDocument: (
+    jid: string,
+    filePath: string,
+    meta?: { caption?: string },
+  ) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
@@ -27,6 +37,35 @@ export interface IpcDeps {
 }
 
 let ipcWatcherRunning = false;
+
+const CONTAINER_IPC_PREFIX = '/workspace/ipc/';
+
+/**
+ * Translate a container-visible path to its host-side equivalent for the
+ * given source group's IPC dir. Throws if the resolved host path escapes
+ * that dir (security boundary). Non-prefixed paths are returned unchanged
+ * (legacy /tmp host paths still work for back-compat).
+ */
+function resolveContainerPath(
+  containerOrHostPath: string,
+  groupIpcDir: string,
+  kind: string,
+): string {
+  if (!containerOrHostPath.startsWith(CONTAINER_IPC_PREFIX)) {
+    return containerOrHostPath;
+  }
+  const rel = containerOrHostPath.slice(CONTAINER_IPC_PREFIX.length);
+  const candidate = path.resolve(groupIpcDir, rel);
+  if (
+    candidate !== groupIpcDir &&
+    !candidate.startsWith(groupIpcDir + path.sep)
+  ) {
+    throw new Error(
+      `${kind} path escapes group IPC dir: ${containerOrHostPath}`,
+    );
+  }
+  return candidate;
+}
 
 export function startIpcWatcher(deps: IpcDeps): void {
   if (ipcWatcherRunning) {
@@ -98,32 +137,13 @@ export function startIpcWatcher(deps: IpcDeps): void {
                 data.audioPath
               ) {
                 if (authorized) {
-                  // Audio paths may come in either as container paths
-                  // (/workspace/ipc/...) or as legacy host paths (e.g.
-                  // /tmp/tts-*.mp3). Translate container paths to the
-                  // sourceGroup's IPC dir on host, with a bounds-check so
-                  // a request can't escape via ../.
                   const groupIpcDir = path.join(ipcBaseDir, sourceGroup);
-                  let hostAudioPath: string = data.audioPath;
-                  const CONTAINER_IPC_PREFIX = '/workspace/ipc/';
-                  if (data.audioPath.startsWith(CONTAINER_IPC_PREFIX)) {
-                    const rel = data.audioPath.slice(
-                      CONTAINER_IPC_PREFIX.length,
-                    );
-                    const candidate = path.resolve(groupIpcDir, rel);
-                    if (
-                      candidate !== groupIpcDir &&
-                      !candidate.startsWith(groupIpcDir + path.sep)
-                    ) {
-                      throw new Error(
-                        `voice_note audioPath escapes group IPC dir: ${data.audioPath}`,
-                      );
-                    }
-                    hostAudioPath = candidate;
-                  }
+                  const hostAudioPath = resolveContainerPath(
+                    data.audioPath,
+                    groupIpcDir,
+                    'voice_note',
+                  );
                   await deps.sendVoice(data.chatJid, hostAudioPath);
-                  // Clean up audio file (works for both container-mapped
-                  // and legacy /tmp paths)
                   try {
                     fs.unlinkSync(hostAudioPath);
                   } catch {
@@ -137,6 +157,68 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   logger.warn(
                     { chatJid: data.chatJid, sourceGroup },
                     'Unauthorized IPC voice_note attempt blocked',
+                  );
+                }
+              } else if (
+                data.type === 'audio_file' &&
+                data.chatJid &&
+                data.audioPath
+              ) {
+                if (authorized) {
+                  const groupIpcDir = path.join(ipcBaseDir, sourceGroup);
+                  const hostAudioPath = resolveContainerPath(
+                    data.audioPath,
+                    groupIpcDir,
+                    'audio_file',
+                  );
+                  await deps.sendAudio(data.chatJid, hostAudioPath, {
+                    title: data.title,
+                    performer: data.performer,
+                    caption: data.caption,
+                  });
+                  try {
+                    fs.unlinkSync(hostAudioPath);
+                  } catch {
+                    // ignore
+                  }
+                  logger.info(
+                    { chatJid: data.chatJid, sourceGroup },
+                    'IPC audio file sent',
+                  );
+                } else {
+                  logger.warn(
+                    { chatJid: data.chatJid, sourceGroup },
+                    'Unauthorized IPC audio_file attempt blocked',
+                  );
+                }
+              } else if (
+                data.type === 'document' &&
+                data.chatJid &&
+                data.filePath
+              ) {
+                if (authorized) {
+                  const groupIpcDir = path.join(ipcBaseDir, sourceGroup);
+                  const hostFilePath = resolveContainerPath(
+                    data.filePath,
+                    groupIpcDir,
+                    'document',
+                  );
+                  await deps.sendDocument(data.chatJid, hostFilePath, {
+                    caption: data.caption,
+                  });
+                  try {
+                    fs.unlinkSync(hostFilePath);
+                  } catch {
+                    // ignore
+                  }
+                  logger.info(
+                    { chatJid: data.chatJid, sourceGroup },
+                    'IPC document sent',
+                  );
+                } else {
+                  logger.warn(
+                    { chatJid: data.chatJid, sourceGroup },
+                    'Unauthorized IPC document attempt blocked',
                   );
                 }
               }

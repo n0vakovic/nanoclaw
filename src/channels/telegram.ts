@@ -453,6 +453,48 @@ export class TelegramChannel implements Channel {
     }
   }
 
+  async sendAudio(
+    jid: string,
+    audioPath: string,
+    meta?: { title?: string; performer?: string; caption?: string },
+  ): Promise<void> {
+    if (!this.bot) {
+      logger.warn('Telegram bot not initialized');
+      return;
+    }
+    try {
+      const numericId = jid.replace(/^tg:/, '');
+      await this.bot.api.sendAudio(numericId, new InputFile(audioPath), {
+        title: meta?.title,
+        performer: meta?.performer,
+        caption: meta?.caption,
+      });
+      logger.info({ jid, audioPath, meta }, 'Telegram audio sent');
+    } catch (err) {
+      logger.error({ jid, audioPath, err }, 'Failed to send Telegram audio');
+    }
+  }
+
+  async sendDocument(
+    jid: string,
+    filePath: string,
+    meta?: { caption?: string },
+  ): Promise<void> {
+    if (!this.bot) {
+      logger.warn('Telegram bot not initialized');
+      return;
+    }
+    try {
+      const numericId = jid.replace(/^tg:/, '');
+      await this.bot.api.sendDocument(numericId, new InputFile(filePath), {
+        caption: meta?.caption,
+      });
+      logger.info({ jid, filePath, meta }, 'Telegram document sent');
+    } catch (err) {
+      logger.error({ jid, filePath, err }, 'Failed to send Telegram document');
+    }
+  }
+
   isConnected(): boolean {
     return this.bot !== null;
   }

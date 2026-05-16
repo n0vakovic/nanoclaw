@@ -8,6 +8,10 @@
  */
 import fs from 'fs';
 import path from 'path';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+
+const execFileAsync = promisify(execFile);
 
 import { GITHUB_ALLOWLIST_PATH } from './config.js';
 import { readEnvFile } from './env.js';
@@ -485,7 +489,88 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
     );
     return JSON.stringify(places);
   },
+
+  /**
+   * Create a GitHub gist from a file the agent has staged in
+   * /workspace/ipc/media/. Returns the gist URL as JSON: { url }.
+   *
+   * params.filePath: required container path under /workspace/ipc/media/
+   * params.public: optional, defaults to false (gist is "secret"/unlisted)
+   * params.description: optional gist description
+   * params.filename: optional override for the file name in the gist
+   *   (otherwise basename of filePath is used)
+   */
+  gistCreate: async (params, ctx) => {
+    const { filePath, public: isPublic, description, filename } = (params ||
+      {}) as {
+      filePath?: string;
+      public?: boolean;
+      description?: string;
+      filename?: string;
+    };
+    if (!filePath) throw new Error('gistCreate: missing params.filePath');
+    if (!ctx?.groupIpcDir)
+      throw new Error('gistCreate: missing ActionContext (groupIpcDir)');
+
+    const hostPath = resolveContainerIpcPath(
+      filePath,
+      ctx.groupIpcDir,
+      'gistCreate',
+    );
+    if (!fs.existsSync(hostPath))
+      throw new Error(`gistCreate: file not found: ${filePath}`);
+
+    // gh gist create [--public] [-d desc] [-f name] <file>
+    // Default (no --public) is "secret"/unlisted.
+    const args: string[] = ['gist', 'create'];
+    if (isPublic) args.push('--public');
+    if (description) args.push('-d', description);
+    if (filename) args.push('-f', filename);
+    args.push(hostPath);
+
+    const { stdout } = await execFileAsync('gh', args);
+    // gh prints the gist URL on the last non-empty line of stdout.
+    const url = stdout
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .pop();
+    if (!url || !/^https:\/\/gist\.github\.com\//.test(url)) {
+      throw new Error(`gistCreate: could not parse gist URL from output: ${stdout}`);
+    }
+    logger.info(
+      { url, public: !!isPublic, sourceGroup: ctx.sourceGroup },
+      'gistCreate completed',
+    );
+    return JSON.stringify({ url });
+  },
 };
+
+/**
+ * Translate a /workspace/ipc/... container path to its host equivalent
+ * under the given group's IPC dir, with bounds-check.
+ */
+function resolveContainerIpcPath(
+  containerPath: string,
+  groupIpcDir: string,
+  kind: string,
+): string {
+  const CONTAINER_IPC_PREFIX = '/workspace/ipc/';
+  if (!containerPath.startsWith(CONTAINER_IPC_PREFIX)) {
+    throw new Error(
+      `${kind}: path must be under /workspace/ipc/: ${containerPath}`,
+    );
+  }
+  const rel = containerPath.slice(CONTAINER_IPC_PREFIX.length);
+  const candidate = path.resolve(groupIpcDir, rel);
+  if (
+    candidate !== groupIpcDir &&
+    !candidate.startsWith(groupIpcDir + path.sep)
+  ) {
+    throw new Error(`${kind}: path escapes group IPC dir: ${containerPath}`);
+  }
+  return candidate;
+}
 
 export async function dispatchAction(
   request: ActionRequest,

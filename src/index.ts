@@ -627,6 +627,20 @@ async function main(): Promise<void> {
         throw new Error(`Channel ${channel.name} does not support voice`);
       return channel.sendVoice(jid, audioPath);
     },
+    sendAudio: (jid, audioPath, meta) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) throw new Error(`No channel for JID: ${jid}`);
+      if (!channel.sendAudio)
+        throw new Error(`Channel ${channel.name} does not support audio`);
+      return channel.sendAudio(jid, audioPath, meta);
+    },
+    sendDocument: (jid, filePath, meta) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) throw new Error(`No channel for JID: ${jid}`);
+      if (!channel.sendDocument)
+        throw new Error(`Channel ${channel.name} does not support document`);
+      return channel.sendDocument(jid, filePath, meta);
+    },
     registeredGroups: () => registeredGroups,
     registerGroup,
     syncGroups: async (force: boolean) => {
