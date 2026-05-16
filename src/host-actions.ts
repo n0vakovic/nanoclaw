@@ -550,6 +550,175 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
     );
     return JSON.stringify({ url });
   },
+
+  /**
+   * Call xAI's Responses API (Grok) with live search over X and/or the web.
+   * Returns a synthesis text plus the raw response envelope.
+   * Requires XAI_API_KEY env var (or .env entry).
+   *
+   * params.prompt: required user prompt
+   * params.source: "x" | "web" | "x+web" (default "x+web")
+   * params.model: defaults to "grok-4-1-fast"
+   * params.systemPrompt: optional, prepended as a system role in input[]
+   * params.fromDate / params.toDate: "YYYY-MM-DD"; prepended to the prompt
+   *   as plain text since xAI live search has no native date-filter params.
+   * params.maxOutputTokens: optional cap on response tokens
+   * params.timeoutMs: default 120000 (xAI live search is slow)
+   *
+   * Returns JSON: { text, raw } — `text` is the concatenated output_text
+   * across message items in response.output[] (may be empty string).
+   */
+  xAIFetch: async (params) => {
+    const apiKey =
+      process.env.XAI_API_KEY || readEnvFile(['XAI_API_KEY']).XAI_API_KEY;
+    if (!apiKey) throw new Error('XAI_API_KEY not set');
+
+    const {
+      prompt,
+      source,
+      model,
+      systemPrompt,
+      fromDate,
+      toDate,
+      maxOutputTokens,
+      timeoutMs,
+    } = (params || {}) as {
+      prompt?: string;
+      source?: string;
+      model?: string;
+      systemPrompt?: string;
+      fromDate?: string;
+      toDate?: string;
+      maxOutputTokens?: number;
+      timeoutMs?: number;
+    };
+
+    if (!prompt) throw new Error('xAIFetch: missing params.prompt');
+
+    const resolvedSource = source ?? 'x+web';
+    if (
+      resolvedSource !== 'x' &&
+      resolvedSource !== 'web' &&
+      resolvedSource !== 'x+web'
+    ) {
+      throw new Error(
+        `xAIFetch: invalid source "${resolvedSource}". Must be "x", "web", or "x+web".`,
+      );
+    }
+
+    const resolvedModel = model ?? 'grok-4-1-fast';
+    const resolvedTimeout = timeoutMs ?? 120_000;
+
+    const tools: Array<{ type: string }> = [];
+    if (resolvedSource === 'x' || resolvedSource === 'x+web') {
+      tools.push({ type: 'x_search' });
+    }
+    if (resolvedSource === 'web' || resolvedSource === 'x+web') {
+      tools.push({ type: 'web_search' });
+    }
+
+    let datedPrompt = prompt;
+    if (fromDate && toDate) {
+      datedPrompt = `Search for results between ${fromDate} and ${toDate}. ${prompt}`;
+    } else if (fromDate) {
+      datedPrompt = `Search for results since ${fromDate}. ${prompt}`;
+    } else if (toDate) {
+      datedPrompt = `Search for results up to ${toDate}. ${prompt}`;
+    }
+
+    const input: Array<{ role: string; content: string }> = [];
+    if (systemPrompt) input.push({ role: 'system', content: systemPrompt });
+    input.push({ role: 'user', content: datedPrompt });
+
+    const body: Record<string, unknown> = {
+      model: resolvedModel,
+      tools,
+      input,
+    };
+    if (maxOutputTokens !== undefined) {
+      body.max_output_tokens = maxOutputTokens;
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), resolvedTimeout);
+
+    let res: Response;
+    try {
+      res = await fetch('https://api.x.ai/v1/responses', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      clearTimeout(timer);
+      if ((err as { name?: string })?.name === 'AbortError') {
+        throw new Error(`xAIFetch: timed out after ${resolvedTimeout}ms`);
+      }
+      throw err;
+    }
+    clearTimeout(timer);
+
+    const respText = await res.text();
+    if (!res.ok) {
+      throw new Error(`xAI ${res.status}: ${respText}`);
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(respText);
+    } catch (err) {
+      throw new Error(
+        `xAIFetch: failed to parse response JSON: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    // Walk output[] for items of type "message", concatenate output_text content.
+    const texts: string[] = [];
+    const output = (parsed as { output?: unknown }).output;
+    if (Array.isArray(output)) {
+      for (const item of output) {
+        if (
+          item &&
+          typeof item === 'object' &&
+          (item as { type?: string }).type === 'message'
+        ) {
+          const content = (item as { content?: unknown }).content;
+          if (Array.isArray(content)) {
+            for (const c of content) {
+              if (
+                c &&
+                typeof c === 'object' &&
+                (c as { type?: string }).type === 'output_text' &&
+                typeof (c as { text?: unknown }).text === 'string'
+              ) {
+                texts.push((c as { text: string }).text);
+              }
+            }
+          }
+        }
+      }
+    }
+    const text = texts.join('\n\n');
+
+    logger.info(
+      {
+        promptChars: prompt.length,
+        source: resolvedSource,
+        model: resolvedModel,
+        hasSystemPrompt: !!systemPrompt,
+        fromDate,
+        toDate,
+        outputChars: text.length,
+      },
+      'xAIFetch completed',
+    );
+
+    return JSON.stringify({ text, raw: parsed });
+  },
 };
 
 /**

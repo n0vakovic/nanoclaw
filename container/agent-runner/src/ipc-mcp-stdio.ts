@@ -264,6 +264,103 @@ server.tool(
   },
 );
 
+/**
+ * Call xAI's Grok with live search over X (Twitter) and/or the web.
+ * Returns a synthesis text. Expensive (paid live search) and slow.
+ */
+server.tool(
+  'xai_fetch',
+  'Call xAI Grok with live search over X (Twitter) and/or the web. Use for synthesis-style questions over X posts and/or the web — returns a synthesis text. For known tweet IDs use xFetch instead (much cheaper, faster); this tool is for open-ended search/aggregation. EXPENSIVE (paid live search) and SLOW (can take up to 2 minutes). Batch your queries; do not retry blindly on transient errors.',
+  {
+    prompt: z.string().describe('The user prompt / question to send to Grok. Be specific about what synthesis you want.'),
+    source: z
+      .enum(['x', 'web', 'x+web'])
+      .optional()
+      .describe(
+        'Where Grok should search. "x" = X (Twitter) posts only — use for social/discourse questions. "web" = web search only — use for articles/news/docs. "x+web" (default) = both — use when unsure or you want broad coverage.',
+      ),
+    model: z
+      .string()
+      .optional()
+      .describe('xAI model id. Defaults to "grok-4-1-fast". Override only if you know a specific model is needed.'),
+    systemPrompt: z
+      .string()
+      .optional()
+      .describe('Optional system-role instruction prepended to the input. Use to shape output format/persona.'),
+    fromDate: z
+      .string()
+      .optional()
+      .describe('Start of date range, "YYYY-MM-DD". Prepended to the prompt as plain text (xAI has no native date filter).'),
+    toDate: z
+      .string()
+      .optional()
+      .describe('End of date range, "YYYY-MM-DD". Prepended to the prompt as plain text.'),
+    maxOutputTokens: z
+      .number()
+      .optional()
+      .describe('Optional cap on response tokens.'),
+    timeoutMs: z
+      .number()
+      .optional()
+      .describe('Optional timeout in ms. Default 120000 (live search is slow).'),
+  },
+  async (args) => {
+    const ACTIONS_DIR = path.join(IPC_DIR, 'actions');
+    const RESULTS_DIR = path.join(IPC_DIR, 'action-results');
+    const requestId = `xai-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    writeIpcFile(ACTIONS_DIR, {
+      action: 'xAIFetch',
+      requestId,
+      params: {
+        prompt: args.prompt,
+        ...(args.source ? { source: args.source } : {}),
+        ...(args.model ? { model: args.model } : {}),
+        ...(args.systemPrompt ? { systemPrompt: args.systemPrompt } : {}),
+        ...(args.fromDate ? { fromDate: args.fromDate } : {}),
+        ...(args.toDate ? { toDate: args.toDate } : {}),
+        ...(args.maxOutputTokens !== undefined ? { maxOutputTokens: args.maxOutputTokens } : {}),
+        ...(args.timeoutMs !== undefined ? { timeoutMs: args.timeoutMs } : {}),
+      },
+    });
+
+    const resultPath = path.join(RESULTS_DIR, `${requestId}.json`);
+    const maxWait = 150_000;
+    const pollInterval = 1_000;
+    let elapsed = 0;
+
+    while (elapsed < maxWait) {
+      if (fs.existsSync(resultPath)) {
+        const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+        fs.unlinkSync(resultPath);
+
+        if (!result.ok) {
+          return {
+            content: [{ type: 'text' as const, text: `xai_fetch failed: ${result.output}` }],
+            isError: true,
+          };
+        }
+
+        let text = '';
+        try {
+          const parsed = JSON.parse(result.output);
+          text = typeof parsed.text === 'string' ? parsed.text : '';
+        } catch {
+          text = result.output;
+        }
+        return { content: [{ type: 'text' as const, text }] };
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollInterval));
+      elapsed += pollInterval;
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: `xai_fetch timed out after ${maxWait}ms.` }],
+      isError: true,
+    };
+  },
+);
+
 server.tool(
   'schedule_task',
   `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools. Returns the task ID for future reference. To modify an existing task, use update_task instead.
