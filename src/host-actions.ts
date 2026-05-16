@@ -7,6 +7,7 @@
  * if it's not here, it cannot be triggered.
  */
 import fs from 'fs';
+import path from 'path';
 
 import { GITHUB_ALLOWLIST_PATH } from './config.js';
 import { readEnvFile } from './env.js';
@@ -26,7 +27,22 @@ export interface ActionResult {
   output: string;
 }
 
-type ActionHandler = (params?: Record<string, unknown>) => Promise<string>;
+/**
+ * Per-request context plumbed from the IPC dispatcher.
+ * sourceGroup: which group's IPC dir originated this action.
+ * groupIpcDir: host-side absolute path to that group's IPC dir
+ *   (mounted into the container at /workspace/ipc).
+ * Handlers that need to write container-readable files use groupIpcDir.
+ */
+export interface ActionContext {
+  sourceGroup: string;
+  groupIpcDir: string;
+}
+
+type ActionHandler = (
+  params?: Record<string, unknown>,
+  ctx?: ActionContext,
+) => Promise<string>;
 
 /* ------------------------------------------------------------------ */
 /*  GitHub Issue helper utilities                                     */
@@ -125,12 +141,17 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
    * Convert text to speech via ElevenLabs TTS API.
    * Returns path to the generated audio file.
    * params.text: text to synthesize
-   * params.voice_id: ElevenLabs voice ID (explicit; highest priority)
+   * params.voice_id: ElevenLabs voice ID or known voice name (lenient — names
+   *   accepted here too so existing callers passing "vlad" as voice_id work)
    * params.voice: named voice from VOICES map (e.g. 'lucy', 'vlad')
    * params.model_id: optional model (defaults to eleven_turbo_v2_5)
-   * Resolution: voice_id > VOICES[voice] > ELEVENLABS_VOICE_ID env
+   * Resolution: voice_id (as ID or name) > VOICES[voice] > ELEVENLABS_VOICE_ID env
+   *
+   * Output path: written to <groupIpcDir>/media/ when ctx is available, and
+   * returned as the container-visible path /workspace/ipc/media/tts-<ts>.mp3.
+   * Falls back to host /tmp only when no ctx (legacy / direct invocations).
    */
-  ttsSpeak: async (params) => {
+  ttsSpeak: async (params, ctx) => {
     const VOICES: Record<string, string> = {
       lucy: 'lcMyyd2HUfFzxdCaC4Ta',
       'funny-nigerian': 'ji8V21dyEPg5du75d9nX',
@@ -156,8 +177,13 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
       );
     }
 
+    // voice_id can be either a literal ElevenLabs UUID or one of the VOICES keys.
+    const resolvedFromVoiceId = voice_id
+      ? VOICES[voice_id] || voice_id
+      : undefined;
+
     const voiceId =
-      voice_id ||
+      resolvedFromVoiceId ||
       (voice ? VOICES[voice] : undefined) ||
       process.env.ELEVENLABS_VOICE_ID ||
       envVars.ELEVENLABS_VOICE_ID;
@@ -188,13 +214,31 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
     }
 
     const buffer = Buffer.from(await res.arrayBuffer());
-    const tmpPath = `/tmp/tts-${Date.now()}.mp3`;
-    fs.writeFileSync(tmpPath, buffer);
+    const filename = `tts-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.mp3`;
+
+    let hostPath: string;
+    let returnedPath: string;
+    if (ctx?.groupIpcDir) {
+      const mediaDir = path.join(ctx.groupIpcDir, 'media');
+      fs.mkdirSync(mediaDir, { recursive: true });
+      hostPath = path.join(mediaDir, filename);
+      returnedPath = `/workspace/ipc/media/${filename}`;
+    } else {
+      hostPath = `/tmp/${filename}`;
+      returnedPath = hostPath;
+    }
+    fs.writeFileSync(hostPath, buffer);
     logger.info(
-      { chars: text.length, voiceId, tmpPath },
+      {
+        chars: text.length,
+        voiceId,
+        hostPath,
+        returnedPath,
+        sourceGroup: ctx?.sourceGroup,
+      },
       'TTS audio generated',
     );
-    return JSON.stringify({ audioPath: tmpPath });
+    return JSON.stringify({ audioPath: returnedPath });
   },
 
   /**
@@ -445,6 +489,7 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
 
 export async function dispatchAction(
   request: ActionRequest,
+  ctx?: ActionContext,
 ): Promise<ActionResult> {
   const handler = ACTION_REGISTRY[request.action];
   if (!handler) {
@@ -456,7 +501,7 @@ export async function dispatchAction(
   }
 
   try {
-    const output = await handler(request.params);
+    const output = await handler(request.params, ctx);
     return { requestId: request.requestId, ok: true, output };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

@@ -98,10 +98,34 @@ export function startIpcWatcher(deps: IpcDeps): void {
                 data.audioPath
               ) {
                 if (authorized) {
-                  await deps.sendVoice(data.chatJid, data.audioPath);
-                  // Clean up temp audio file
+                  // Audio paths may come in either as container paths
+                  // (/workspace/ipc/...) or as legacy host paths (e.g.
+                  // /tmp/tts-*.mp3). Translate container paths to the
+                  // sourceGroup's IPC dir on host, with a bounds-check so
+                  // a request can't escape via ../.
+                  const groupIpcDir = path.join(ipcBaseDir, sourceGroup);
+                  let hostAudioPath: string = data.audioPath;
+                  const CONTAINER_IPC_PREFIX = '/workspace/ipc/';
+                  if (data.audioPath.startsWith(CONTAINER_IPC_PREFIX)) {
+                    const rel = data.audioPath.slice(
+                      CONTAINER_IPC_PREFIX.length,
+                    );
+                    const candidate = path.resolve(groupIpcDir, rel);
+                    if (
+                      candidate !== groupIpcDir &&
+                      !candidate.startsWith(groupIpcDir + path.sep)
+                    ) {
+                      throw new Error(
+                        `voice_note audioPath escapes group IPC dir: ${data.audioPath}`,
+                      );
+                    }
+                    hostAudioPath = candidate;
+                  }
+                  await deps.sendVoice(data.chatJid, hostAudioPath);
+                  // Clean up audio file (works for both container-mapped
+                  // and legacy /tmp paths)
                   try {
-                    fs.unlinkSync(data.audioPath);
+                    fs.unlinkSync(hostAudioPath);
                   } catch {
                     // ignore — file may already be gone
                   }
@@ -188,7 +212,10 @@ export function startIpcWatcher(deps: IpcDeps): void {
                 fs.readFileSync(filePath, 'utf-8'),
               ) as ActionRequest;
               fs.unlinkSync(filePath);
-              dispatchAction(request)
+              dispatchAction(request, {
+                sourceGroup,
+                groupIpcDir: path.join(ipcBaseDir, sourceGroup),
+              })
                 .then((result) => {
                   fs.mkdirSync(actionResultsDir, { recursive: true });
                   fs.writeFileSync(
