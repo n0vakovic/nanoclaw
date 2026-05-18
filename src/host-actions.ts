@@ -719,6 +719,122 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
 
     return JSON.stringify({ text, raw: parsed });
   },
+
+  /**
+   * Append to or read from Milan's personal innernet log.
+   * Requires INNERNET_ADMIN_TOKEN env var on the host.
+   *
+   * params.op: "read" | "log"
+   * For "log":
+   *   params.text: required entry text
+   *   params.tags: optional comma-separated tags
+   *   params.reflection: optional reflection
+   *   params.visibility: "public" (default) | "private"
+   * For "read":
+   *   params.limit: max entries to return (default 50)
+   */
+  innernet: async (params) => {
+    const token =
+      process.env.INNERNET_ADMIN_TOKEN ||
+      readEnvFile(['INNERNET_ADMIN_TOKEN']).INNERNET_ADMIN_TOKEN;
+    if (!token) throw new Error('INNERNET_ADMIN_TOKEN not set');
+
+    const BASE = 'https://api.innernet.znachilo.com';
+
+    const { op, text, tags, reflection, visibility, limit } = (params ||
+      {}) as {
+      op?: string;
+      text?: string;
+      tags?: string;
+      reflection?: string;
+      visibility?: string;
+      limit?: number;
+    };
+
+    if (!op) throw new Error('innernet: missing params.op');
+
+    switch (op) {
+      case 'read': {
+        const res = await fetch(`${BASE}/logs`, {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const body = await res.text();
+        if (!res.ok) throw new Error(`Innernet ${res.status}: ${body}`);
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(body);
+        } catch (err) {
+          throw new Error(
+            `innernet read: failed to parse response JSON: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        const effectiveLimit = limit ?? 50;
+        const sliced = Array.isArray(parsed)
+          ? parsed.slice(0, effectiveLimit)
+          : parsed;
+        logger.info(
+          { op, limit: effectiveLimit },
+          'innernet completed',
+        );
+        return JSON.stringify(sliced);
+      }
+
+      case 'log': {
+        if (typeof text !== 'string' || text.length === 0) {
+          throw new Error('innernet log: missing or empty params.text');
+        }
+        if (
+          visibility !== undefined &&
+          visibility !== 'public' &&
+          visibility !== 'private'
+        ) {
+          throw new Error(
+            `innernet log: invalid visibility "${visibility}". Must be "public" or "private".`,
+          );
+        }
+        const payload = {
+          text,
+          tags: tags ?? '',
+          reflection: reflection ?? '',
+          visibility: visibility ?? 'public',
+          timestamp: new Date().toISOString(),
+        };
+        const res = await fetch(`${BASE}/log`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(payload),
+        });
+        const body = await res.text();
+        if (!res.ok) throw new Error(`Innernet ${res.status}: ${body}`);
+        let result: string;
+        try {
+          result = JSON.stringify(JSON.parse(body));
+        } catch {
+          result = JSON.stringify({ raw: body });
+        }
+        logger.info(
+          {
+            op,
+            textChars: text.length,
+            hasTags: !!tags,
+            hasReflection: !!reflection,
+            visibility: payload.visibility,
+          },
+          'innernet completed',
+        );
+        return result;
+      }
+
+      default:
+        throw new Error(
+          `innernet: unknown op "${op}". Valid: read, log`,
+        );
+    }
+  },
 };
 
 /**

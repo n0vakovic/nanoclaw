@@ -632,6 +632,116 @@ Use available_groups.json to find the JID for a group. The folder name must be c
   },
 );
 
+/**
+ * Append an entry to Milan's personal innernet log via the host action.
+ */
+server.tool(
+  'innernet_log',
+  "Append an entry to Milan's personal innernet log. Use ONLY when Milan explicitly asks to log something (e.g. 'log that I went to the gym'). Never log proactively. Innernet auto-extracts tags from emoji/hashtags in the text, so the optional `tags` param is rarely needed.",
+  {
+    text: z.string().describe('The log entry text. Include emoji/hashtags — innernet auto-extracts tags.'),
+    tags: z.string().optional().describe('Comma-separated tags (rarely needed; autotag handles it).'),
+    reflection: z.string().optional().describe('Optional reflection/note attached to the entry.'),
+    visibility: z.enum(['public', 'private']).optional().describe("Default 'public'. Use 'private' for sensitive content."),
+  },
+  async (args) => {
+    const ACTIONS_DIR = path.join(IPC_DIR, 'actions');
+    const RESULTS_DIR = path.join(IPC_DIR, 'action-results');
+    const requestId = `innernet-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    writeIpcFile(ACTIONS_DIR, {
+      action: 'innernet',
+      requestId,
+      params: {
+        op: 'log',
+        text: args.text,
+        ...(args.tags !== undefined ? { tags: args.tags } : {}),
+        ...(args.reflection !== undefined ? { reflection: args.reflection } : {}),
+        ...(args.visibility !== undefined ? { visibility: args.visibility } : {}),
+      },
+    });
+
+    const resultPath = path.join(RESULTS_DIR, `${requestId}.json`);
+    const maxWait = 30_000;
+    const pollInterval = 500;
+    let elapsed = 0;
+
+    while (elapsed < maxWait) {
+      if (fs.existsSync(resultPath)) {
+        const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+        fs.unlinkSync(resultPath);
+
+        if (!result.ok) {
+          return {
+            content: [{ type: 'text' as const, text: `innernet_log failed: ${result.output}` }],
+            isError: true,
+          };
+        }
+        return { content: [{ type: 'text' as const, text: result.output }] };
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollInterval));
+      elapsed += pollInterval;
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: 'innernet_log timed out after 30 seconds.' }],
+      isError: true,
+    };
+  },
+);
+
+/**
+ * Read recent entries from Milan's personal innernet log via the host action.
+ */
+server.tool(
+  'innernet_read',
+  "Read recent entries from Milan's personal innernet log. Use to ground analysis or answer questions like 'how's my week been?' or 'what have I logged about gym lately?'. Returns a JSON array of log entries (most recent first).",
+  {
+    limit: z.number().optional().describe('Max entries to return (default 50).'),
+  },
+  async (args) => {
+    const ACTIONS_DIR = path.join(IPC_DIR, 'actions');
+    const RESULTS_DIR = path.join(IPC_DIR, 'action-results');
+    const requestId = `innernet-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    writeIpcFile(ACTIONS_DIR, {
+      action: 'innernet',
+      requestId,
+      params: {
+        op: 'read',
+        ...(args.limit !== undefined ? { limit: args.limit } : {}),
+      },
+    });
+
+    const resultPath = path.join(RESULTS_DIR, `${requestId}.json`);
+    const maxWait = 30_000;
+    const pollInterval = 500;
+    let elapsed = 0;
+
+    while (elapsed < maxWait) {
+      if (fs.existsSync(resultPath)) {
+        const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+        fs.unlinkSync(resultPath);
+
+        if (!result.ok) {
+          return {
+            content: [{ type: 'text' as const, text: `innernet_read failed: ${result.output}` }],
+            isError: true,
+          };
+        }
+        return { content: [{ type: 'text' as const, text: result.output }] };
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollInterval));
+      elapsed += pollInterval;
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: 'innernet_read timed out after 30 seconds.' }],
+      isError: true,
+    };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);
