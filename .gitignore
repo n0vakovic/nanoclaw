@@ -36,3 +36,8 @@ groups/global/*
 .nanoclaw/
 
 agents-sdk-docs
+
+# Codex local tooling (not nanoclaw config)
+.agents/
+.codex/
+AGENTS.md

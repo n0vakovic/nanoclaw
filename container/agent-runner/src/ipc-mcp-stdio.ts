@@ -742,6 +742,109 @@ server.tool(
   },
 );
 
+/**
+ * Search Milan's ChatGPT conversation archive (znachai) by title.
+ */
+server.tool(
+  'chats_search',
+  "Search Milan's ChatGPT conversation archive by title (case-insensitive substring). Returns most-recent-first list of {id, title, msg_count, update_time}. Pass no query (or empty) to get the recent slice. Note: title-only — a relevant chat with an unrelated title won't surface, so try synonyms if first search misses. Use chat_read with the returned id to fetch the markdown body.",
+  {
+    query: z.string().optional().describe('Substring filter on title. Omit for recent chats.'),
+    limit: z.number().optional().describe('Max results (default 20).'),
+  },
+  async (args) => {
+    const ACTIONS_DIR = path.join(IPC_DIR, 'actions');
+    const RESULTS_DIR = path.join(IPC_DIR, 'action-results');
+    const requestId = `chats-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    writeIpcFile(ACTIONS_DIR, {
+      action: 'chats',
+      requestId,
+      params: {
+        op: 'search',
+        ...(args.query !== undefined ? { query: args.query } : {}),
+        ...(args.limit !== undefined ? { limit: args.limit } : {}),
+      },
+    });
+
+    const resultPath = path.join(RESULTS_DIR, `${requestId}.json`);
+    const maxWait = 30_000;
+    const pollInterval = 500;
+    let elapsed = 0;
+
+    while (elapsed < maxWait) {
+      if (fs.existsSync(resultPath)) {
+        const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+        fs.unlinkSync(resultPath);
+
+        if (!result.ok) {
+          return {
+            content: [{ type: 'text' as const, text: `chats_search failed: ${result.output}` }],
+            isError: true,
+          };
+        }
+        return { content: [{ type: 'text' as const, text: result.output }] };
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollInterval));
+      elapsed += pollInterval;
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: 'chats_search timed out after 30 seconds.' }],
+      isError: true,
+    };
+  },
+);
+
+/**
+ * Read a ChatGPT chat as markdown by id (prefix or full uuid).
+ */
+server.tool(
+  'chat_read',
+  "Read a ChatGPT chat from Milan's archive by id. Accepts the 8-char prefix from chats_search or a full uuid. Returns the chat as markdown.",
+  {
+    id: z.string().describe('Chat id from chats_search (8-char prefix or full uuid).'),
+  },
+  async (args) => {
+    const ACTIONS_DIR = path.join(IPC_DIR, 'actions');
+    const RESULTS_DIR = path.join(IPC_DIR, 'action-results');
+    const requestId = `chats-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    writeIpcFile(ACTIONS_DIR, {
+      action: 'chats',
+      requestId,
+      params: { op: 'read', id: args.id },
+    });
+
+    const resultPath = path.join(RESULTS_DIR, `${requestId}.json`);
+    const maxWait = 60_000;
+    const pollInterval = 500;
+    let elapsed = 0;
+
+    while (elapsed < maxWait) {
+      if (fs.existsSync(resultPath)) {
+        const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+        fs.unlinkSync(resultPath);
+
+        if (!result.ok) {
+          return {
+            content: [{ type: 'text' as const, text: `chat_read failed: ${result.output}` }],
+            isError: true,
+          };
+        }
+        return { content: [{ type: 'text' as const, text: result.output }] };
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollInterval));
+      elapsed += pollInterval;
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: 'chat_read timed out after 60 seconds.' }],
+      isError: true,
+    };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

@@ -773,10 +773,7 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
         const sliced = Array.isArray(parsed)
           ? parsed.slice(0, effectiveLimit)
           : parsed;
-        logger.info(
-          { op, limit: effectiveLimit },
-          'innernet completed',
-        );
+        logger.info({ op, limit: effectiveLimit }, 'innernet completed');
         return JSON.stringify(sliced);
       }
 
@@ -830,9 +827,110 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
       }
 
       default:
+        throw new Error(`innernet: unknown op "${op}". Valid: read, log`);
+    }
+  },
+
+  /**
+   * Search/read Milan's ChatGPT conversation archive on znachai.
+   *
+   * params.op: "search" | "read"
+   * For "search":
+   *   params.query: optional substring filter on title (case-insensitive)
+   *   params.limit: max results (default 20)
+   *   Returns chats sorted newest-first; empty query = recent slice.
+   * For "read":
+   *   params.id: chat id (8-char prefix or full uuid)
+   *   Returns markdown body of the chat.
+   */
+  chats: async (params) => {
+    const env = readEnvFile(['ZNACHAI_API_KEY', 'ZNACHAI_READ_TOKEN', 'ZNACHAI_URL']);
+    const apiKey = process.env.ZNACHAI_API_KEY || env.ZNACHAI_API_KEY;
+    const readToken = process.env.ZNACHAI_READ_TOKEN || env.ZNACHAI_READ_TOKEN;
+    const BASE = process.env.ZNACHAI_URL || env.ZNACHAI_URL || 'https://znachai.fly.dev';
+
+    const { op, query, limit, id } = (params || {}) as {
+      op?: string;
+      query?: string;
+      limit?: number;
+      id?: string;
+    };
+
+    if (!op) throw new Error('chats: missing params.op');
+
+    const fetchIndex = async (): Promise<Array<Record<string, unknown>>> => {
+      if (!apiKey) throw new Error('ZNACHAI_API_KEY not set');
+      const res = await fetch(`${BASE}/api/chatgpt/chats`, {
+        headers: { 'X-API-Key': apiKey },
+      });
+      const body = await res.text();
+      if (!res.ok) throw new Error(`znachai ${res.status}: ${body}`);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(body);
+      } catch (err) {
         throw new Error(
-          `innernet: unknown op "${op}". Valid: read, log`,
+          `chats: failed to parse index JSON: ${err instanceof Error ? err.message : String(err)}`,
         );
+      }
+      const arr = (parsed as { chats?: unknown })?.chats;
+      return Array.isArray(arr) ? (arr as Array<Record<string, unknown>>) : [];
+    };
+
+    switch (op) {
+      case 'search': {
+        let chats = await fetchIndex();
+        if (query && typeof query === 'string' && query.length > 0) {
+          const q = query.toLowerCase();
+          chats = chats.filter((c) =>
+            String(c.title ?? '').toLowerCase().includes(q),
+          );
+        }
+        const effectiveLimit = limit ?? 20;
+        const sliced = chats.slice(0, effectiveLimit).map((c) => ({
+          id: c.id,
+          title: c.title,
+          msg_count: c.msg_count ?? c.messageCount,
+          update_time: c.update_time ?? c.updated_at,
+        }));
+        logger.info(
+          { op, hasQuery: !!query, limit: effectiveLimit, returned: sliced.length },
+          'chats completed',
+        );
+        return JSON.stringify(sliced);
+      }
+
+      case 'read': {
+        if (!readToken) throw new Error('ZNACHAI_READ_TOKEN not set');
+        if (!id || typeof id !== 'string') {
+          throw new Error('chats read: missing params.id');
+        }
+        let fullId = id;
+        if (id.length < 36) {
+          const chats = await fetchIndex();
+          const matches = chats.filter((c) =>
+            String(c.id ?? '').startsWith(id),
+          );
+          if (matches.length === 0) {
+            throw new Error(`chats read: no chat matching id "${id}"`);
+          }
+          if (matches.length > 1) {
+            throw new Error(
+              `chats read: ambiguous id "${id}" matches ${matches.length} chats`,
+            );
+          }
+          fullId = String(matches[0].id);
+        }
+        const url = `${BASE}/chats/${fullId}.md?token=${encodeURIComponent(readToken)}`;
+        const res = await fetch(url);
+        const body = await res.text();
+        if (!res.ok) throw new Error(`znachai ${res.status}: ${body}`);
+        logger.info({ op, id: fullId, bytes: body.length }, 'chats completed');
+        return body;
+      }
+
+      default:
+        throw new Error(`chats: unknown op "${op}". Valid: search, read`);
     }
   },
 };
