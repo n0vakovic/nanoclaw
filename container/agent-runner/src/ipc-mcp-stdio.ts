@@ -16,6 +16,7 @@ const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
 const TASKS_DIR = path.join(IPC_DIR, 'tasks');
 const ACTIONS_DIR = path.join(IPC_DIR, 'actions');
 const RESULTS_DIR = path.join(IPC_DIR, 'action-results');
+const INTERGROUP_RESULTS_DIR = path.join(IPC_DIR, 'intergroup-results');
 
 // Context from environment variables (set by the agent runner)
 const chatJid = process.env.NANOCLAW_CHAT_JID!;
@@ -62,6 +63,33 @@ async function requestHostAction(
   }
 
   throw new Error(`${action} timed out after ${maxWait}ms`);
+}
+
+async function waitForIntergroupResult(
+  requestId: string,
+  timeoutMs = 180_000,
+): Promise<Record<string, unknown>> {
+  const resultPath = path.join(INTERGROUP_RESULTS_DIR, `${requestId}.json`);
+  const pollInterval = 500;
+  let elapsed = 0;
+
+  while (elapsed < timeoutMs) {
+    if (fs.existsSync(resultPath)) {
+      const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as Record<
+        string,
+        unknown
+      >;
+      if (result.status === 'success' || result.status === 'error') {
+        return result;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollInterval));
+    elapsed += pollInterval;
+  }
+
+  throw new Error(
+    `Timed out waiting for intergroup result ${requestId} after ${timeoutMs}ms`,
+  );
 }
 
 const server = new McpServer({
@@ -1244,15 +1272,70 @@ server.tool(
 );
 
 server.tool(
+  'read_group_session_tail',
+  'Main group only. Read a compact, structured tail of a registered group agent session without raw JSONL digging.',
+  {
+    group_folder: z.string().describe('Registered target group folder.'),
+    session_file: z
+      .string()
+      .optional()
+      .describe(
+        'Optional JSONL filename from list_group_sessions. Defaults to the newest session file.',
+      ),
+    limit: z
+      .number()
+      .optional()
+      .describe('Number of recent entries to return. Default 20, max 100.'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Only the main group can read group sessions.',
+          },
+        ],
+        isError: true,
+      };
+    }
+    try {
+      const output = await requestHostAction(
+        'readGroupSessionTail',
+        {
+          group: args.group_folder,
+          sessionFile: args.session_file,
+          limit: args.limit,
+        },
+        30_000,
+      );
+      return { content: [{ type: 'text' as const, text: output }] };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `read_group_session_tail failed: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
   'message_group_agent',
-  'Main group only. Send an admin-originated message into another registered group agent’s own context. The target agent replies back to main by default.',
+  'Main group only. Send an admin-originated message into another registered group agent’s own context. By default this waits for and returns the target agent result to the caller; Telegram delivery is optional.',
   {
     group_folder: z.string().describe('Registered target group folder.'),
     prompt: z.string().describe('Message for the target group agent.'),
     reply_to: z
       .enum(['main', 'target_group', 'both'])
       .default('main')
-      .describe('Where the target agent result should be delivered.'),
+      .describe(
+        'main = return result to this tool call only; target_group = also deliver to target Telegram/chat; both = return result and deliver to target Telegram/chat.',
+      ),
     context_mode: z
       .enum(['group', 'isolated'])
       .default('group')
@@ -1264,6 +1347,24 @@ server.tool(
       .optional()
       .describe(
         'Default false. When false, the target agent is instructed to draft changes rather than editing its files.',
+      ),
+    wait_for_reply: z
+      .boolean()
+      .optional()
+      .describe(
+        'Default true. Wait for the target agent result and return it.',
+      ),
+    timeout_ms: z
+      .number()
+      .optional()
+      .describe(
+        'How long to wait for the reply when wait_for_reply is true. Default 180000.',
+      ),
+    deliver_to_main_chat: z
+      .boolean()
+      .optional()
+      .describe(
+        'Default false. Also send the target reply to the human main chat. The structured result is returned regardless.',
       ),
   },
   async (args) => {
@@ -1278,24 +1379,124 @@ server.tool(
         isError: true,
       };
     }
+    const requestId = `intergroup-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     writeIpcFile(TASKS_DIR, {
       type: 'message_group_agent',
+      requestId,
       groupFolder: args.group_folder,
       prompt: args.prompt,
       replyTo: args.reply_to,
       contextMode: args.context_mode,
       allowSelfEdit: args.allow_self_edit === true,
+      deliverToTargetChat:
+        args.reply_to === 'target_group' || args.reply_to === 'both',
+      deliverToMainChat: args.deliver_to_main_chat === true,
       createdBy: groupFolder,
       timestamp: new Date().toISOString(),
     });
+
+    if (args.wait_for_reply !== false) {
+      try {
+        const result = await waitForIntergroupResult(
+          requestId,
+          args.timeout_ms ?? 180_000,
+        );
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+          isError: result.status === 'error',
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(
+                {
+                  requestId,
+                  status: 'timeout',
+                  targetGroup: args.group_folder,
+                  error: err instanceof Error ? err.message : String(err),
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+
     return {
       content: [
         {
           type: 'text' as const,
-          text: `Message queued for ${args.group_folder}.`,
+          text: JSON.stringify(
+            {
+              requestId,
+              status: 'queued',
+              targetGroup: args.group_folder,
+            },
+            null,
+            2,
+          ),
         },
       ],
     };
+  },
+);
+
+server.tool(
+  'await_group_agent_reply',
+  'Main group only. Wait for a previously queued message_group_agent result by request ID.',
+  {
+    request_id: z
+      .string()
+      .describe('The requestId returned by message_group_agent.'),
+    timeout_ms: z
+      .number()
+      .optional()
+      .describe('How long to wait. Default 180000.'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Only the main group can await another group agent reply.',
+          },
+        ],
+        isError: true,
+      };
+    }
+    try {
+      const result = await waitForIntergroupResult(
+        args.request_id,
+        args.timeout_ms ?? 180_000,
+      );
+      return {
+        content: [
+          { type: 'text' as const, text: JSON.stringify(result, null, 2) },
+        ],
+        isError: result.status === 'error',
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `await_group_agent_reply failed: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
   },
 );
 

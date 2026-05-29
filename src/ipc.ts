@@ -35,12 +35,15 @@ export interface IpcDeps {
     registeredJids: Set<string>,
   ) => void;
   messageGroupAgent?: (opts: {
+    requestId: string;
     sourceGroup: string;
     targetGroupFolder: string;
     prompt: string;
     replyTo: 'main' | 'target_group' | 'both';
     contextMode: 'group' | 'isolated';
     allowSelfEdit: boolean;
+    deliverToTargetChat: boolean;
+    deliverToMainChat: boolean;
   }) => Promise<void>;
 }
 
@@ -373,9 +376,12 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
+    requestId?: string;
     replyTo?: string;
     contextMode?: string;
     allowSelfEdit?: boolean;
+    deliverToTargetChat?: boolean;
+    deliverToMainChat?: boolean;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -693,16 +699,26 @@ export async function processTaskIpc(
           : 'main';
       const contextMode =
         data.contextMode === 'isolated' ? 'isolated' : 'group';
+      const requestId =
+        data.requestId ||
+        `intergroup-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       await deps.messageGroupAgent({
+        requestId,
         sourceGroup,
         targetGroupFolder: data.groupFolder,
         prompt: data.prompt,
         replyTo,
         contextMode,
         allowSelfEdit: data.allowSelfEdit === true,
+        deliverToTargetChat:
+          data.deliverToTargetChat === true ||
+          replyTo === 'target_group' ||
+          replyTo === 'both',
+        deliverToMainChat: data.deliverToMainChat === true,
       });
       logger.info(
         {
+          requestId,
           sourceGroup,
           targetGroupFolder: data.groupFolder,
           replyTo,

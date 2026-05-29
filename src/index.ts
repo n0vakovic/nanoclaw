@@ -4,6 +4,7 @@ import path from 'path';
 import {
   ASSISTANT_NAME,
   CREDENTIAL_PROXY_PORT,
+  DATA_DIR,
   IDLE_TIMEOUT,
   POLL_INTERVAL,
   TIMEZONE,
@@ -361,12 +362,15 @@ function findRegisteredGroupByFolder(
 }
 
 async function messageGroupAgent(opts: {
+  requestId: string;
   sourceGroup: string;
   targetGroupFolder: string;
   prompt: string;
   replyTo: 'main' | 'target_group' | 'both';
   contextMode: 'group' | 'isolated';
   allowSelfEdit: boolean;
+  deliverToTargetChat: boolean;
+  deliverToMainChat: boolean;
 }): Promise<void> {
   const target = findRegisteredGroupByFolder(opts.targetGroupFolder);
   if (!target) {
@@ -380,9 +384,10 @@ async function messageGroupAgent(opts: {
       .find(({ group }) => group.isMain === true);
   if (!source) throw new Error('Main group registration not found');
 
-  const taskId = `intergroup-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const taskId = opts.requestId;
   const sessionId =
     opts.contextMode === 'group' ? sessions[target.group.folder] : undefined;
+  const startedAt = new Date().toISOString();
 
   const wrappedPrompt = [
     '[MAIN-GROUP MESSAGE]',
@@ -392,6 +397,8 @@ async function messageGroupAgent(opts: {
     `Context mode: ${opts.contextMode}`,
     `Self-edit allowed: ${opts.allowSelfEdit ? 'yes' : 'no'}`,
     '',
+    'Your result will be returned to the main agent as structured data. Telegram delivery is optional and controlled separately.',
+    '',
     opts.allowSelfEdit
       ? 'You may update files in your group folder only if the request explicitly calls for it.'
       : 'Do not modify files in your group folder. If changes would help, draft the proposed change in your reply.',
@@ -399,11 +406,54 @@ async function messageGroupAgent(opts: {
     opts.prompt,
   ].join('\n');
 
+  const writeResult = (result: {
+    status: 'queued' | 'success' | 'error';
+    result?: string | null;
+    error?: string | null;
+    newSessionId?: string;
+  }) => {
+    const sourceIpcDir = path.join(DATA_DIR, 'ipc', opts.sourceGroup);
+    const resultsDir = path.join(sourceIpcDir, 'intergroup-results');
+    fs.mkdirSync(resultsDir, { recursive: true });
+    const payload = {
+      requestId: opts.requestId,
+      status: result.status,
+      sourceGroup: opts.sourceGroup,
+      sourceJid: source.jid,
+      sourceName: source.group.name,
+      targetGroup: target.group.folder,
+      targetJid: target.jid,
+      targetName: target.group.name,
+      replyTo: opts.replyTo,
+      contextMode: opts.contextMode,
+      allowSelfEdit: opts.allowSelfEdit,
+      deliverToTargetChat: opts.deliverToTargetChat,
+      deliverToMainChat: opts.deliverToMainChat,
+      prompt: opts.prompt,
+      result: result.result ?? null,
+      error: result.error ?? null,
+      newSessionId: result.newSessionId,
+      startedAt,
+      completedAt: new Date().toISOString(),
+    };
+    const resultPath = path.join(resultsDir, `${opts.requestId}.json`);
+    const tmpPath = `${resultPath}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(tmpPath, JSON.stringify(payload, null, 2) + '\n');
+    fs.renameSync(tmpPath, resultPath);
+
+    const auditPath = path.join(DATA_DIR, 'intergroup-messages.jsonl');
+    fs.mkdirSync(path.dirname(auditPath), { recursive: true });
+    fs.appendFileSync(auditPath, JSON.stringify(payload) + '\n');
+  };
+
+  writeResult({ status: 'queued' });
+
   queue.enqueueTask(target.jid, taskId, async () => {
     let closeTimer: ReturnType<typeof setTimeout> | null = null;
+    const streamedResults: string[] = [];
     const scheduleClose = () => {
       if (closeTimer) return;
-      closeTimer = setTimeout(() => queue.closeStdin(target.jid), 10_000);
+      closeTimer = setTimeout(() => queue.closeStdin(target.jid), 2_000);
     };
     const sendTo = async (jid: string, rawText: string) => {
       const channel = findChannel(channels, jid);
@@ -468,11 +518,12 @@ async function messageGroupAgent(opts: {
             setSession(target.group.folder, streamedOutput.newSessionId);
           }
           if (streamedOutput.result) {
-            const text = `[${target.group.name}]\n${streamedOutput.result}`;
-            if (opts.replyTo === 'main' || opts.replyTo === 'both') {
+            streamedResults.push(streamedOutput.result);
+            if (opts.deliverToMainChat) {
+              const text = `[${target.group.name}]\n${streamedOutput.result}`;
               await sendTo(source.jid, text);
             }
-            if (opts.replyTo === 'target_group' || opts.replyTo === 'both') {
+            if (opts.deliverToTargetChat) {
               await sendTo(target.jid, streamedOutput.result);
             }
             scheduleClose();
@@ -489,9 +540,32 @@ async function messageGroupAgent(opts: {
         setSession(target.group.folder, output.newSessionId);
       }
       if (output.status === 'error') {
-        const errorText = `Inter-group message to ${target.group.name} failed: ${output.error || 'unknown error'}`;
-        await sendTo(source.jid, errorText);
+        const errorText = output.error || 'unknown error';
+        if (opts.deliverToMainChat) {
+          await sendTo(
+            source.jid,
+            `Inter-group message to ${target.group.name} failed: ${errorText}`,
+          );
+        }
+        writeResult({
+          status: 'error',
+          error: errorText,
+          newSessionId: output.newSessionId,
+        });
+      } else {
+        writeResult({
+          status: 'success',
+          result:
+            streamedResults.length > 0
+              ? streamedResults.join('\n\n')
+              : output.result,
+          newSessionId: output.newSessionId,
+        });
       }
+    } catch (err) {
+      const errorText = err instanceof Error ? err.message : String(err);
+      writeResult({ status: 'error', error: errorText });
+      throw err;
     } finally {
       if (closeTimer) clearTimeout(closeTimer);
     }

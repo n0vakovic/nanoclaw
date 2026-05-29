@@ -136,4 +136,66 @@ describe('admin memory host actions', () => {
     expect(result.ok).toBe(true);
     expect(groups['other@g.us'].requiresTrigger).toBe(false);
   });
+
+  it('reads a compact tail of a registered group session', async () => {
+    const sessionDir = path.join(
+      testPaths.dataDir,
+      'sessions',
+      'other-group',
+      '.claude',
+      'projects',
+      '-workspace-group',
+    );
+    fs.mkdirSync(sessionDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(sessionDir, 'session-1.jsonl'),
+      [
+        JSON.stringify({
+          type: 'user',
+          timestamp: '2026-05-29T10:00:00.000Z',
+          message: { role: 'user', content: 'hello from main' },
+        }),
+        JSON.stringify({
+          type: 'assistant',
+          timestamp: '2026-05-29T10:00:01.000Z',
+          message: {
+            role: 'assistant',
+            content: [
+              { type: 'text', text: 'hello back' },
+              { type: 'tool_use', name: 'read_file' },
+            ],
+          },
+        }),
+      ].join('\n') + '\n',
+    );
+
+    const result = await dispatchAction(
+      {
+        action: 'readGroupSessionTail',
+        requestId: 'req-4',
+        params: {
+          group: 'other-group',
+          limit: 2,
+        },
+      },
+      {
+        ...mainContext,
+        registeredGroups: () => ({
+          'other@g.us': {
+            name: 'Other',
+            folder: 'other-group',
+            trigger: '@Andy',
+            added_at: '2024-01-01T00:00:00.000Z',
+          },
+        }),
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    const parsed = JSON.parse(result.output);
+    expect(parsed.group).toBe('other-group');
+    expect(parsed.entries).toHaveLength(2);
+    expect(parsed.entries[1].text).toBe('hello back');
+    expect(parsed.entries[1].toolNames).toEqual(['read_file']);
+  });
 });

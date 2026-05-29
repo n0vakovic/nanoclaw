@@ -248,6 +248,146 @@ function parseGroupFolder(value: unknown): string {
   return value;
 }
 
+function parsePositiveInt(
+  value: unknown,
+  fallback: number,
+  max: number,
+): number {
+  if (value === undefined || value === null) return fallback;
+  const parsed = typeof value === 'number' ? value : Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`Invalid positive integer "${String(value)}"`);
+  }
+  return Math.min(parsed, max);
+}
+
+function resolveGroupSessionDir(groupFolder: string): string {
+  const sessionsBase = path.resolve(DATA_DIR, 'sessions');
+  const projectDir = path.resolve(
+    sessionsBase,
+    groupFolder,
+    '.claude',
+    'projects',
+    '-workspace-group',
+  );
+  ensureWithinBase(sessionsBase, projectDir);
+  return projectDir;
+}
+
+function resolveSessionJsonlFile(
+  projectDir: string,
+  sessionFile?: unknown,
+): string {
+  if (typeof sessionFile === 'string' && sessionFile.trim()) {
+    const file = sessionFile.trim();
+    if (
+      path.basename(file) !== file ||
+      file.includes('\\') ||
+      file.includes('..') ||
+      !file.endsWith('.jsonl')
+    ) {
+      throw new Error(`Invalid session file "${file}"`);
+    }
+    const resolved = path.resolve(projectDir, file);
+    ensureWithinBase(projectDir, resolved);
+    if (!fs.existsSync(resolved)) {
+      throw new Error(`Session file not found: ${file}`);
+    }
+    return resolved;
+  }
+
+  if (!fs.existsSync(projectDir)) {
+    throw new Error(`No session directory found for requested group`);
+  }
+  const candidates = fs
+    .readdirSync(projectDir)
+    .filter((file) => file.endsWith('.jsonl'))
+    .map((file) => {
+      const filePath = path.join(projectDir, file);
+      return { filePath, mtimeMs: fs.statSync(filePath).mtimeMs };
+    })
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+  if (!candidates.length) {
+    throw new Error(`No session JSONL files found for requested group`);
+  }
+  return candidates[0].filePath;
+}
+
+function truncateText(text: string, max = 1600): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, max - 15)}... [truncated]`;
+}
+
+function stringifySnippet(value: unknown): string | undefined {
+  if (typeof value === 'string') return truncateText(value);
+  if (value === undefined || value === null) return undefined;
+  try {
+    return truncateText(JSON.stringify(value));
+  } catch {
+    return truncateText(String(value));
+  }
+}
+
+function extractContentSummary(content: unknown): {
+  text?: string;
+  toolNames?: string[];
+} {
+  if (typeof content === 'string') return { text: truncateText(content) };
+  if (!Array.isArray(content)) return {};
+
+  const textParts: string[] = [];
+  const toolNames: string[] = [];
+  for (const item of content) {
+    if (!item || typeof item !== 'object') continue;
+    const record = item as Record<string, unknown>;
+    if (record.type === 'text' && typeof record.text === 'string') {
+      textParts.push(record.text);
+    } else if (record.type === 'tool_use' && typeof record.name === 'string') {
+      toolNames.push(record.name);
+    } else if (record.type === 'tool_result') {
+      textParts.push('[tool_result]');
+    }
+  }
+
+  return {
+    text: textParts.length ? truncateText(textParts.join('\n')) : undefined,
+    toolNames: toolNames.length ? toolNames : undefined,
+  };
+}
+
+function summarizeSessionLine(line: string, lineNumber: number): unknown {
+  try {
+    const parsed = JSON.parse(line) as Record<string, unknown>;
+    const message =
+      parsed.message && typeof parsed.message === 'object'
+        ? (parsed.message as Record<string, unknown>)
+        : undefined;
+    const contentSummary = extractContentSummary(message?.content);
+    return {
+      line: lineNumber,
+      type: parsed.type,
+      role: message?.role,
+      timestamp: parsed.timestamp,
+      uuid: parsed.uuid,
+      sessionId: parsed.sessionId,
+      text:
+        contentSummary.text ??
+        stringifySnippet(parsed.result) ??
+        stringifySnippet(parsed.summary),
+      toolNames: contentSummary.toolNames,
+      subtype: parsed.subtype,
+    };
+  } catch (err) {
+    return {
+      line: lineNumber,
+      type: 'parse_error',
+      text: truncateText(line),
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 /* ------------------------------------------------------------------ */
 
 const ACTION_REGISTRY: Record<string, ActionHandler> = {
@@ -394,6 +534,36 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
       requiresTrigger: params.requiresTrigger,
     });
     return JSON.stringify({ jid, group: updated });
+  },
+
+  readGroupSessionTail: async (params, ctx) => {
+    assertMain(ctx);
+    const groupFolder = parseGroupFolder(params?.group);
+    findRegisteredGroupByFolder(ctx, groupFolder);
+    const limit = parsePositiveInt(params?.limit, 20, 100);
+    const projectDir = resolveGroupSessionDir(groupFolder);
+    const sessionPath = resolveSessionJsonlFile(
+      projectDir,
+      params?.sessionFile,
+    );
+    const raw = fs.readFileSync(sessionPath, 'utf-8');
+    const lines = raw.trimEnd() ? raw.trimEnd().split('\n') : [];
+    const start = Math.max(0, lines.length - limit);
+    const entries = lines
+      .slice(start)
+      .map((line, index) => summarizeSessionLine(line, start + index + 1));
+
+    return JSON.stringify(
+      {
+        group: groupFolder,
+        file: path.basename(sessionPath),
+        totalLines: lines.length,
+        returnedLines: entries.length,
+        entries,
+      },
+      null,
+      2,
+    );
   },
 
   /**

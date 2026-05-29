@@ -688,6 +688,7 @@ describe('message_group_agent authorization', () => {
     await processTaskIpc(
       {
         type: 'message_group_agent',
+        requestId: 'req-intergroup-1',
         groupFolder: 'other-group',
         prompt: 'Reflect on your recent sessions',
         replyTo: 'both',
@@ -699,12 +700,15 @@ describe('message_group_agent authorization', () => {
     );
 
     expect(messageGroupAgent).toHaveBeenCalledWith({
+      requestId: 'req-intergroup-1',
       sourceGroup: 'whatsapp_main',
       targetGroupFolder: 'other-group',
       prompt: 'Reflect on your recent sessions',
       replyTo: 'both',
       contextMode: 'group',
       allowSelfEdit: false,
+      deliverToTargetChat: true,
+      deliverToMainChat: false,
     });
   });
 
