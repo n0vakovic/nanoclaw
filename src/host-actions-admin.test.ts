@@ -35,6 +35,7 @@ vi.mock('./sync-action.js', () => ({
 }));
 
 import { dispatchAction } from './host-actions.js';
+import { writeIntergroupInboxItem } from './intergroup-inbox.js';
 import { RegisteredGroup } from './types.js';
 
 const mainContext = {
@@ -197,5 +198,56 @@ describe('admin memory host actions', () => {
     expect(parsed.entries).toHaveLength(2);
     expect(parsed.entries[1].text).toBe('hello back');
     expect(parsed.entries[1].toolNames).toEqual(['read_file']);
+  });
+
+  it('lists and acknowledges intergroup inbox items', async () => {
+    writeIntergroupInboxItem({
+      id: 'surface-test-1',
+      sourceGroup: 'other-group',
+      sourceName: 'Other',
+      sourceJid: 'other@g.us',
+      mainGroup: 'telegram_main',
+      mainJid: 'main@g.us',
+      subject: 'Check this',
+      body: 'Something worth noticing',
+      priority: 'high',
+      createdAt: '2026-05-29T12:00:00.000Z',
+    });
+
+    const listed = await dispatchAction(
+      {
+        action: 'listIntergroupInbox',
+        requestId: 'req-5',
+        params: {},
+      },
+      mainContext,
+    );
+
+    expect(listed.ok).toBe(true);
+    const listPayload = JSON.parse(listed.output);
+    expect(listPayload.items).toHaveLength(1);
+    expect(listPayload.items[0].subject).toBe('Check this');
+
+    const acked = await dispatchAction(
+      {
+        action: 'ackIntergroupInbox',
+        requestId: 'req-6',
+        params: { id: 'surface-test-1' },
+      },
+      mainContext,
+    );
+
+    expect(acked.ok).toBe(true);
+    expect(JSON.parse(acked.output).acknowledgedAt).toBeTruthy();
+
+    const listedAfterAck = await dispatchAction(
+      {
+        action: 'listIntergroupInbox',
+        requestId: 'req-7',
+        params: {},
+      },
+      mainContext,
+    );
+    expect(JSON.parse(listedAfterAck.output).items).toHaveLength(0);
   });
 });

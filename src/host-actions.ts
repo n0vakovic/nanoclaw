@@ -18,6 +18,11 @@ import { DATA_DIR, GITHUB_ALLOWLIST_PATH, GROUPS_DIR } from './config.js';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 import { isValidGroupFolder, resolveGroupFolderPath } from './group-folder.js';
+import {
+  acknowledgeIntergroupInboxItem,
+  listIntergroupInboxItems,
+  parseInboxItemId,
+} from './intergroup-inbox.js';
 import { runSyncRepos } from './sync-action.js';
 import {
   GitHubAllowlist,
@@ -561,6 +566,31 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
         returnedLines: entries.length,
         entries,
       },
+      null,
+      2,
+    );
+  },
+
+  listIntergroupInbox: async (params, ctx) => {
+    assertMain(ctx);
+    const limit = parsePositiveInt(params?.limit, 50, 200);
+    return JSON.stringify(
+      {
+        items: listIntergroupInboxItems(ctx.sourceGroup, {
+          includeAcknowledged: params?.includeAcknowledged === true,
+          limit,
+        }),
+      },
+      null,
+      2,
+    );
+  },
+
+  ackIntergroupInbox: async (params, ctx) => {
+    assertMain(ctx);
+    const id = parseInboxItemId(params?.id);
+    return JSON.stringify(
+      acknowledgeIntergroupInboxItem(ctx.sourceGroup, id, ctx.sourceGroup),
       null,
       2,
     );

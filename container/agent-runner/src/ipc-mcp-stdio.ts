@@ -1325,6 +1325,147 @@ server.tool(
 );
 
 server.tool(
+  'surface_to_main',
+  'Non-main groups only. Surface a note, finding, or request into the main agent inbox for DamRassBot to review later. Urgent items also notify the main chat.',
+  {
+    subject: z.string().describe('Short title for the surfaced item.'),
+    body: z.string().describe('The full note or request for the main agent.'),
+    priority: z
+      .enum(['low', 'normal', 'high', 'urgent'])
+      .default('normal')
+      .describe('Urgent items also notify the main chat immediately.'),
+    notify_main_chat: z
+      .boolean()
+      .optional()
+      .describe(
+        'Default false. Also send a Telegram/chat notification to main.',
+      ),
+  },
+  async (args) => {
+    if (isMain) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'The main group cannot surface an item to itself.',
+          },
+        ],
+        isError: true,
+      };
+    }
+    const surfaceId = `surface-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    writeIpcFile(TASKS_DIR, {
+      type: 'surface_to_main',
+      surfaceId,
+      subject: args.subject,
+      body: args.body,
+      priority: args.priority,
+      notifyMainChat: args.notify_main_chat === true,
+      createdBy: groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: JSON.stringify(
+            {
+              id: surfaceId,
+              status: 'surfaced',
+              priority: args.priority,
+            },
+            null,
+            2,
+          ),
+        },
+      ],
+    };
+  },
+);
+
+server.tool(
+  'list_intergroup_inbox',
+  'Main group only. List notes surfaced proactively by other group agents.',
+  {
+    include_acknowledged: z
+      .boolean()
+      .optional()
+      .describe('Default false. Include already acknowledged inbox items.'),
+    limit: z
+      .number()
+      .optional()
+      .describe('Number of items to return. Default 50, max 200.'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Only the main group can list the intergroup inbox.',
+          },
+        ],
+        isError: true,
+      };
+    }
+    try {
+      const output = await requestHostAction('listIntergroupInbox', {
+        includeAcknowledged: args.include_acknowledged === true,
+        limit: args.limit,
+      });
+      return { content: [{ type: 'text' as const, text: output }] };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `list_intergroup_inbox failed: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'ack_intergroup_inbox',
+  'Main group only. Mark a surfaced intergroup inbox item as acknowledged.',
+  {
+    id: z.string().describe('Inbox item id from list_intergroup_inbox.'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Only the main group can acknowledge intergroup inbox items.',
+          },
+        ],
+        isError: true,
+      };
+    }
+    try {
+      const output = await requestHostAction('ackIntergroupInbox', {
+        id: args.id,
+      });
+      return { content: [{ type: 'text' as const, text: output }] };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `ack_intergroup_inbox failed: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
   'message_group_agent',
   'Main group only. Send an admin-originated message into another registered group agent’s own context. By default this waits for and returns the target agent result to the caller; Telegram delivery is optional.',
   {

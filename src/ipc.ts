@@ -8,6 +8,10 @@ import { dispatchAction, ActionRequest } from './host-actions.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
+import {
+  parseInboxPriority,
+  writeIntergroupInboxItem,
+} from './intergroup-inbox.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
@@ -382,6 +386,11 @@ export async function processTaskIpc(
     allowSelfEdit?: boolean;
     deliverToTargetChat?: boolean;
     deliverToMainChat?: boolean;
+    surfaceId?: string;
+    subject?: string;
+    body?: string;
+    priority?: string;
+    notifyMainChat?: boolean;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -725,6 +734,67 @@ export async function processTaskIpc(
           contextMode,
         },
         'message_group_agent queued',
+      );
+      break;
+    }
+
+    case 'surface_to_main': {
+      if (isMain) {
+        logger.warn({ sourceGroup }, 'Main group cannot surface to itself');
+        break;
+      }
+      if (typeof data.body !== 'string' || !data.body.trim()) {
+        logger.warn({ sourceGroup }, 'surface_to_main missing body');
+        break;
+      }
+
+      const sourceEntry = Object.entries(registeredGroups).find(
+        ([, group]) => group.folder === sourceGroup,
+      );
+      const mainEntry = Object.entries(registeredGroups).find(
+        ([, group]) => group.isMain === true,
+      );
+      if (!sourceEntry || !mainEntry) {
+        logger.warn(
+          { sourceGroup, hasMain: !!mainEntry },
+          'surface_to_main missing registered source or main group',
+        );
+        break;
+      }
+
+      const [sourceJid, source] = sourceEntry;
+      const [mainJid, main] = mainEntry;
+      const priority = parseInboxPriority(data.priority);
+      const subject =
+        typeof data.subject === 'string' && data.subject.trim()
+          ? data.subject.trim()
+          : `Surfaced from ${source.name}`;
+      const body = data.body.trim();
+      const id =
+        data.surfaceId ||
+        `surface-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const item = writeIntergroupInboxItem({
+        id,
+        sourceGroup,
+        sourceName: source.name,
+        sourceJid,
+        mainGroup: main.folder,
+        mainJid,
+        subject,
+        body,
+        priority,
+        createdAt: new Date().toISOString(),
+      });
+
+      if (data.notifyMainChat === true || priority === 'urgent') {
+        await deps.sendMessage(
+          mainJid,
+          `[${priority.toUpperCase()} from ${source.name}]\n${subject}\n\n${body}`,
+        );
+      }
+      logger.info(
+        { id: item.id, sourceGroup, mainGroup: main.folder, priority },
+        'Intergroup inbox item surfaced',
       );
       break;
     }
