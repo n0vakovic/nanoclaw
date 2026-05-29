@@ -95,6 +95,14 @@ function buildVolumeMounts(
       containerPath: '/workspace/group',
       readonly: false,
     });
+
+    const sessionsRoot = path.join(DATA_DIR, 'sessions');
+    fs.mkdirSync(sessionsRoot, { recursive: true });
+    mounts.push({
+      hostPath: sessionsRoot,
+      containerPath: '/workspace/group-sessions',
+      readonly: true,
+    });
   } else {
     // Other groups only get their own folder
     mounts.push({
@@ -702,6 +710,54 @@ export interface AvailableGroup {
   name: string;
   lastActivity: string;
   isRegistered: boolean;
+}
+
+export function writeGroupSessionsIndex(
+  registeredGroups: Record<string, RegisteredGroup>,
+): void {
+  const sessionsRoot = path.join(DATA_DIR, 'sessions');
+  fs.mkdirSync(sessionsRoot, { recursive: true });
+
+  const groups = Object.entries(registeredGroups).map(([jid, group]) => {
+    const projectDir = path.join(
+      sessionsRoot,
+      group.folder,
+      '.claude',
+      'projects',
+      '-workspace-group',
+    );
+    const jsonlFiles = fs.existsSync(projectDir)
+      ? fs
+          .readdirSync(projectDir)
+          .filter((file) => file.endsWith('.jsonl'))
+          .sort()
+      : [];
+
+    return {
+      jid,
+      name: group.name,
+      folder: group.folder,
+      isMain: group.isMain === true,
+      hostProjectDir: projectDir,
+      containerProjectDir: `/workspace/group-sessions/${group.folder}/.claude/projects/-workspace-group`,
+      jsonlFiles,
+    };
+  });
+
+  const indexPath = path.join(sessionsRoot, '_nanoclaw-index.json');
+  const tmpPath = `${indexPath}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(
+    tmpPath,
+    JSON.stringify(
+      {
+        generatedAt: new Date().toISOString(),
+        groups,
+      },
+      null,
+      2,
+    ) + '\n',
+  );
+  fs.renameSync(tmpPath, indexPath);
 }
 
 /**

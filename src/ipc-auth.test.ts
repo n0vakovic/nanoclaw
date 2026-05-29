@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 import {
   _initTestDatabase,
@@ -677,5 +677,50 @@ describe('register_group success', () => {
     );
 
     expect(getRegisteredGroup('partial@g.us')).toBeUndefined();
+  });
+});
+
+// --- message_group_agent authorization ---
+
+describe('message_group_agent authorization', () => {
+  it('main group can queue an in-context message to another group agent', async () => {
+    const messageGroupAgent = vi.fn(async () => {});
+    await processTaskIpc(
+      {
+        type: 'message_group_agent',
+        groupFolder: 'other-group',
+        prompt: 'Reflect on your recent sessions',
+        replyTo: 'both',
+        contextMode: 'group',
+      },
+      'whatsapp_main',
+      true,
+      { ...deps, messageGroupAgent },
+    );
+
+    expect(messageGroupAgent).toHaveBeenCalledWith({
+      sourceGroup: 'whatsapp_main',
+      targetGroupFolder: 'other-group',
+      prompt: 'Reflect on your recent sessions',
+      replyTo: 'both',
+      contextMode: 'group',
+      allowSelfEdit: false,
+    });
+  });
+
+  it('non-main group cannot queue an in-context message to another group agent', async () => {
+    const messageGroupAgent = vi.fn(async () => {});
+    await processTaskIpc(
+      {
+        type: 'message_group_agent',
+        groupFolder: 'third-group',
+        prompt: 'hello',
+      },
+      'other-group',
+      false,
+      { ...deps, messageGroupAgent },
+    );
+
+    expect(messageGroupAgent).not.toHaveBeenCalled();
   });
 });

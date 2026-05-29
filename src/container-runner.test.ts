@@ -12,6 +12,7 @@ vi.mock('./config.js', () => ({
   CONTAINER_MAX_OUTPUT_SIZE: 10485760,
   CONTAINER_TIMEOUT: 1800000, // 30min
   CREDENTIAL_PROXY_PORT: 3001,
+  CODING_DIR: '/tmp/nanoclaw-test-coding',
   DATA_DIR: '/tmp/nanoclaw-test-data',
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
   IDLE_TIMEOUT: 1800000, // 30min
@@ -87,6 +88,7 @@ vi.mock('child_process', async () => {
 });
 
 import { runContainerAgent, ContainerOutput } from './container-runner.js';
+import { spawn } from 'child_process';
 import type { RegisteredGroup } from './types.js';
 
 const testGroup: RegisteredGroup = {
@@ -115,6 +117,7 @@ describe('container-runner timeout behavior', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
   });
 
   afterEach(() => {
@@ -206,5 +209,22 @@ describe('container-runner timeout behavior', () => {
     const result = await resultPromise;
     expect(result.status).toBe('success');
     expect(result.newSessionId).toBe('session-456');
+  });
+
+  it('mounts cross-group sessions read-only for main containers', async () => {
+    const resultPromise = runContainerAgent(
+      { ...testGroup, isMain: true },
+      { ...testInput, isMain: true },
+      () => {},
+    );
+
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await resultPromise;
+
+    const args = vi.mocked(spawn).mock.calls[0][1] as string[];
+    expect(args).toContain(
+      '/tmp/nanoclaw-test-data/sessions:/workspace/group-sessions:ro',
+    );
   });
 });

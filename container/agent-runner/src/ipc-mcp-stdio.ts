@@ -14,6 +14,8 @@ import { CronExpressionParser } from 'cron-parser';
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
 const TASKS_DIR = path.join(IPC_DIR, 'tasks');
+const ACTIONS_DIR = path.join(IPC_DIR, 'actions');
+const RESULTS_DIR = path.join(IPC_DIR, 'action-results');
 
 // Context from environment variables (set by the agent runner)
 const chatJid = process.env.NANOCLAW_CHAT_JID!;
@@ -34,6 +36,34 @@ function writeIpcFile(dir: string, data: object): string {
   return filename;
 }
 
+async function requestHostAction(
+  action: string,
+  params: Record<string, unknown>,
+  maxWait = 30_000,
+): Promise<string> {
+  const requestId = `${action}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  writeIpcFile(ACTIONS_DIR, { action, requestId, params });
+
+  const resultPath = path.join(RESULTS_DIR, `${requestId}.json`);
+  const pollInterval = 500;
+  let elapsed = 0;
+
+  while (elapsed < maxWait) {
+    if (fs.existsSync(resultPath)) {
+      const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+      fs.unlinkSync(resultPath);
+      if (!result.ok) {
+        throw new Error(String(result.output));
+      }
+      return String(result.output);
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollInterval));
+    elapsed += pollInterval;
+  }
+
+  throw new Error(`${action} timed out after ${maxWait}ms`);
+}
+
 const server = new McpServer({
   name: 'nanoclaw',
   version: '1.0.0',
@@ -44,7 +74,12 @@ server.tool(
   "Send a message to the user or group immediately while you're still running. Use this for progress updates or to send multiple messages. You can call this multiple times.",
   {
     text: z.string().describe('The message text to send'),
-    sender: z.string().optional().describe('Your role/identity name (e.g. "Researcher"). When set, messages appear from a dedicated bot in Telegram.'),
+    sender: z
+      .string()
+      .optional()
+      .describe(
+        'Your role/identity name (e.g. "Researcher"). When set, messages appear from a dedicated bot in Telegram.',
+      ),
   },
   async (args) => {
     const data: Record<string, string | undefined> = {
@@ -66,7 +101,11 @@ server.tool(
   'send_voice_note',
   'Convert text to speech and send as a voice note to the chat. Use when the user requests voice output or when /voice mode is active. Write naturally for speech — no markdown, no bullet lists, short sentences. Optional `voice` param picks a non-default voice (see param description).',
   {
-    text: z.string().describe('The text to speak. Write for natural speech — no markdown, no bullets, no headers.'),
+    text: z
+      .string()
+      .describe(
+        'The text to speak. Write for natural speech — no markdown, no bullets, no headers.',
+      ),
     voice: z
       .enum(['lucy', 'funny-nigerian', 'indian', 'vlad'])
       .optional()
@@ -104,7 +143,9 @@ server.tool(
 
         if (!result.ok) {
           return {
-            content: [{ type: 'text' as const, text: `TTS failed: ${result.output}` }],
+            content: [
+              { type: 'text' as const, text: `TTS failed: ${result.output}` },
+            ],
             isError: true,
           };
         }
@@ -120,7 +161,9 @@ server.tool(
           timestamp: new Date().toISOString(),
         });
 
-        return { content: [{ type: 'text' as const, text: 'Voice note sent.' }] };
+        return {
+          content: [{ type: 'text' as const, text: 'Voice note sent.' }],
+        };
       }
 
       await new Promise((resolve) => setTimeout(resolve, pollInterval));
@@ -128,7 +171,9 @@ server.tool(
     }
 
     return {
-      content: [{ type: 'text' as const, text: 'TTS timed out after 30 seconds.' }],
+      content: [
+        { type: 'text' as const, text: 'TTS timed out after 30 seconds.' },
+      ],
       isError: true,
     };
   },
@@ -148,10 +193,21 @@ server.tool(
   {
     audioPath: z
       .string()
-      .describe('Container path under /workspace/ipc/media/ (e.g. "/workspace/ipc/media/podcast.mp3")'),
-    title: z.string().optional().describe('Track title shown in Telegram audio player'),
-    performer: z.string().optional().describe('Performer/artist shown in audio player'),
-    caption: z.string().optional().describe('Optional caption text shown below the audio'),
+      .describe(
+        'Container path under /workspace/ipc/media/ (e.g. "/workspace/ipc/media/podcast.mp3")',
+      ),
+    title: z
+      .string()
+      .optional()
+      .describe('Track title shown in Telegram audio player'),
+    performer: z
+      .string()
+      .optional()
+      .describe('Performer/artist shown in audio player'),
+    caption: z
+      .string()
+      .optional()
+      .describe('Optional caption text shown below the audio'),
   },
   async (args) => {
     writeIpcFile(MESSAGES_DIR, {
@@ -164,7 +220,9 @@ server.tool(
       groupFolder,
       timestamp: new Date().toISOString(),
     });
-    return { content: [{ type: 'text' as const, text: 'Audio file queued for send.' }] };
+    return {
+      content: [{ type: 'text' as const, text: 'Audio file queued for send.' }],
+    };
   },
 );
 
@@ -178,8 +236,13 @@ server.tool(
   {
     filePath: z
       .string()
-      .describe('Container path under /workspace/ipc/media/ (e.g. "/workspace/ipc/media/report.md")'),
-    caption: z.string().optional().describe('Optional caption text shown below the document'),
+      .describe(
+        'Container path under /workspace/ipc/media/ (e.g. "/workspace/ipc/media/report.md")',
+      ),
+    caption: z
+      .string()
+      .optional()
+      .describe('Optional caption text shown below the document'),
   },
   async (args) => {
     writeIpcFile(MESSAGES_DIR, {
@@ -190,7 +253,9 @@ server.tool(
       groupFolder,
       timestamp: new Date().toISOString(),
     });
-    return { content: [{ type: 'text' as const, text: 'Document queued for send.' }] };
+    return {
+      content: [{ type: 'text' as const, text: 'Document queued for send.' }],
+    };
   },
 );
 
@@ -206,10 +271,23 @@ server.tool(
   {
     filePath: z
       .string()
-      .describe('Container path under /workspace/ipc/media/ (e.g. "/workspace/ipc/media/notes.md")'),
-    public: z.boolean().optional().describe('false (default) = secret/unlisted; true = public/listed'),
-    description: z.string().optional().describe('Gist description (shown on the gist page)'),
-    filename: z.string().optional().describe('Override filename inside the gist (otherwise basename of filePath)'),
+      .describe(
+        'Container path under /workspace/ipc/media/ (e.g. "/workspace/ipc/media/notes.md")',
+      ),
+    public: z
+      .boolean()
+      .optional()
+      .describe('false (default) = secret/unlisted; true = public/listed'),
+    description: z
+      .string()
+      .optional()
+      .describe('Gist description (shown on the gist page)'),
+    filename: z
+      .string()
+      .optional()
+      .describe(
+        'Override filename inside the gist (otherwise basename of filePath)',
+      ),
   },
   async (args) => {
     const ACTIONS_DIR = path.join(IPC_DIR, 'actions');
@@ -239,7 +317,12 @@ server.tool(
 
         if (!result.ok) {
           return {
-            content: [{ type: 'text' as const, text: `Gist create failed: ${result.output}` }],
+            content: [
+              {
+                type: 'text' as const,
+                text: `Gist create failed: ${result.output}`,
+              },
+            ],
             isError: true,
           };
         }
@@ -258,7 +341,12 @@ server.tool(
     }
 
     return {
-      content: [{ type: 'text' as const, text: 'Gist creation timed out after 30 seconds.' }],
+      content: [
+        {
+          type: 'text' as const,
+          text: 'Gist creation timed out after 30 seconds.',
+        },
+      ],
       isError: true,
     };
   },
@@ -272,7 +360,11 @@ server.tool(
   'xai_fetch',
   'Call xAI Grok with live search over X (Twitter) and/or the web. Use for synthesis-style questions over X posts and/or the web — returns a synthesis text. For known tweet IDs use xFetch instead (much cheaper, faster); this tool is for open-ended search/aggregation. EXPENSIVE (paid live search) and SLOW (can take up to 2 minutes). Batch your queries; do not retry blindly on transient errors.',
   {
-    prompt: z.string().describe('The user prompt / question to send to Grok. Be specific about what synthesis you want.'),
+    prompt: z
+      .string()
+      .describe(
+        'The user prompt / question to send to Grok. Be specific about what synthesis you want.',
+      ),
     source: z
       .enum(['x', 'web', 'x+web'])
       .optional()
@@ -282,19 +374,27 @@ server.tool(
     model: z
       .string()
       .optional()
-      .describe('xAI model id. Defaults to "grok-4-1-fast". Override only if you know a specific model is needed.'),
+      .describe(
+        'xAI model id. Defaults to "grok-4-1-fast". Override only if you know a specific model is needed.',
+      ),
     systemPrompt: z
       .string()
       .optional()
-      .describe('Optional system-role instruction prepended to the input. Use to shape output format/persona.'),
+      .describe(
+        'Optional system-role instruction prepended to the input. Use to shape output format/persona.',
+      ),
     fromDate: z
       .string()
       .optional()
-      .describe('Start of date range, "YYYY-MM-DD". Prepended to the prompt as plain text (xAI has no native date filter).'),
+      .describe(
+        'Start of date range, "YYYY-MM-DD". Prepended to the prompt as plain text (xAI has no native date filter).',
+      ),
     toDate: z
       .string()
       .optional()
-      .describe('End of date range, "YYYY-MM-DD". Prepended to the prompt as plain text.'),
+      .describe(
+        'End of date range, "YYYY-MM-DD". Prepended to the prompt as plain text.',
+      ),
     maxOutputTokens: z
       .number()
       .optional()
@@ -302,7 +402,9 @@ server.tool(
     timeoutMs: z
       .number()
       .optional()
-      .describe('Optional timeout in ms. Default 120000 (live search is slow).'),
+      .describe(
+        'Optional timeout in ms. Default 120000 (live search is slow).',
+      ),
   },
   async (args) => {
     const ACTIONS_DIR = path.join(IPC_DIR, 'actions');
@@ -319,7 +421,9 @@ server.tool(
         ...(args.systemPrompt ? { systemPrompt: args.systemPrompt } : {}),
         ...(args.fromDate ? { fromDate: args.fromDate } : {}),
         ...(args.toDate ? { toDate: args.toDate } : {}),
-        ...(args.maxOutputTokens !== undefined ? { maxOutputTokens: args.maxOutputTokens } : {}),
+        ...(args.maxOutputTokens !== undefined
+          ? { maxOutputTokens: args.maxOutputTokens }
+          : {}),
         ...(args.timeoutMs !== undefined ? { timeoutMs: args.timeoutMs } : {}),
       },
     });
@@ -336,7 +440,12 @@ server.tool(
 
         if (!result.ok) {
           return {
-            content: [{ type: 'text' as const, text: `xai_fetch failed: ${result.output}` }],
+            content: [
+              {
+                type: 'text' as const,
+                text: `xai_fetch failed: ${result.output}`,
+              },
+            ],
             isError: true,
           };
         }
@@ -355,7 +464,12 @@ server.tool(
     }
 
     return {
-      content: [{ type: 'text' as const, text: `xai_fetch timed out after ${maxWait}ms.` }],
+      content: [
+        {
+          type: 'text' as const,
+          text: `xai_fetch timed out after ${maxWait}ms.`,
+        },
+      ],
       isError: true,
     };
   },
@@ -385,11 +499,33 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
 \u2022 interval: Milliseconds between runs (e.g., "300000" for 5 minutes, "3600000" for 1 hour)
 \u2022 once: Local time WITHOUT "Z" suffix (e.g., "2026-02-01T15:30:00"). Do NOT use UTC/Z suffix.`,
   {
-    prompt: z.string().describe('What the agent should do when the task runs. For isolated mode, include all necessary context here.'),
-    schedule_type: z.enum(['cron', 'interval', 'once']).describe('cron=recurring at specific times, interval=recurring every N ms, once=run once at specific time'),
-    schedule_value: z.string().describe('cron: "*/5 * * * *" | interval: milliseconds like "300000" | once: local timestamp like "2026-02-01T15:30:00" (no Z suffix!)'),
-    context_mode: z.enum(['group', 'isolated']).default('group').describe('group=runs with chat history and memory, isolated=fresh session (include context in prompt)'),
-    target_group_jid: z.string().optional().describe('(Main group only) JID of the group to schedule the task for. Defaults to the current group.'),
+    prompt: z
+      .string()
+      .describe(
+        'What the agent should do when the task runs. For isolated mode, include all necessary context here.',
+      ),
+    schedule_type: z
+      .enum(['cron', 'interval', 'once'])
+      .describe(
+        'cron=recurring at specific times, interval=recurring every N ms, once=run once at specific time',
+      ),
+    schedule_value: z
+      .string()
+      .describe(
+        'cron: "*/5 * * * *" | interval: milliseconds like "300000" | once: local timestamp like "2026-02-01T15:30:00" (no Z suffix!)',
+      ),
+    context_mode: z
+      .enum(['group', 'isolated'])
+      .default('group')
+      .describe(
+        'group=runs with chat history and memory, isolated=fresh session (include context in prompt)',
+      ),
+    target_group_jid: z
+      .string()
+      .optional()
+      .describe(
+        '(Main group only) JID of the group to schedule the task for. Defaults to the current group.',
+      ),
   },
   async (args) => {
     // Validate schedule_value before writing IPC
@@ -398,7 +534,12 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
         CronExpressionParser.parse(args.schedule_value);
       } catch {
         return {
-          content: [{ type: 'text' as const, text: `Invalid cron: "${args.schedule_value}". Use format like "0 9 * * *" (daily 9am) or "*/5 * * * *" (every 5 min).` }],
+          content: [
+            {
+              type: 'text' as const,
+              text: `Invalid cron: "${args.schedule_value}". Use format like "0 9 * * *" (daily 9am) or "*/5 * * * *" (every 5 min).`,
+            },
+          ],
           isError: true,
         };
       }
@@ -406,28 +547,47 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
       const ms = parseInt(args.schedule_value, 10);
       if (isNaN(ms) || ms <= 0) {
         return {
-          content: [{ type: 'text' as const, text: `Invalid interval: "${args.schedule_value}". Must be positive milliseconds (e.g., "300000" for 5 min).` }],
+          content: [
+            {
+              type: 'text' as const,
+              text: `Invalid interval: "${args.schedule_value}". Must be positive milliseconds (e.g., "300000" for 5 min).`,
+            },
+          ],
           isError: true,
         };
       }
     } else if (args.schedule_type === 'once') {
-      if (/[Zz]$/.test(args.schedule_value) || /[+-]\d{2}:\d{2}$/.test(args.schedule_value)) {
+      if (
+        /[Zz]$/.test(args.schedule_value) ||
+        /[+-]\d{2}:\d{2}$/.test(args.schedule_value)
+      ) {
         return {
-          content: [{ type: 'text' as const, text: `Timestamp must be local time without timezone suffix. Got "${args.schedule_value}" — use format like "2026-02-01T15:30:00".` }],
+          content: [
+            {
+              type: 'text' as const,
+              text: `Timestamp must be local time without timezone suffix. Got "${args.schedule_value}" — use format like "2026-02-01T15:30:00".`,
+            },
+          ],
           isError: true,
         };
       }
       const date = new Date(args.schedule_value);
       if (isNaN(date.getTime())) {
         return {
-          content: [{ type: 'text' as const, text: `Invalid timestamp: "${args.schedule_value}". Use local time format like "2026-02-01T15:30:00".` }],
+          content: [
+            {
+              type: 'text' as const,
+              text: `Invalid timestamp: "${args.schedule_value}". Use local time format like "2026-02-01T15:30:00".`,
+            },
+          ],
           isError: true,
         };
       }
     }
 
     // Non-main groups can only schedule for themselves
-    const targetJid = isMain && args.target_group_jid ? args.target_group_jid : chatJid;
+    const targetJid =
+      isMain && args.target_group_jid ? args.target_group_jid : chatJid;
 
     const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -446,7 +606,12 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
     writeIpcFile(TASKS_DIR, data);
 
     return {
-      content: [{ type: 'text' as const, text: `Task ${taskId} scheduled: ${args.schedule_type} - ${args.schedule_value}` }],
+      content: [
+        {
+          type: 'text' as const,
+          text: `Task ${taskId} scheduled: ${args.schedule_type} - ${args.schedule_value}`,
+        },
+      ],
     };
   },
 );
@@ -460,30 +625,56 @@ server.tool(
 
     try {
       if (!fs.existsSync(tasksFile)) {
-        return { content: [{ type: 'text' as const, text: 'No scheduled tasks found.' }] };
+        return {
+          content: [
+            { type: 'text' as const, text: 'No scheduled tasks found.' },
+          ],
+        };
       }
 
       const allTasks = JSON.parse(fs.readFileSync(tasksFile, 'utf-8'));
 
       const tasks = isMain
         ? allTasks
-        : allTasks.filter((t: { groupFolder: string }) => t.groupFolder === groupFolder);
+        : allTasks.filter(
+            (t: { groupFolder: string }) => t.groupFolder === groupFolder,
+          );
 
       if (tasks.length === 0) {
-        return { content: [{ type: 'text' as const, text: 'No scheduled tasks found.' }] };
+        return {
+          content: [
+            { type: 'text' as const, text: 'No scheduled tasks found.' },
+          ],
+        };
       }
 
       const formatted = tasks
         .map(
-          (t: { id: string; prompt: string; schedule_type: string; schedule_value: string; status: string; next_run: string }) =>
+          (t: {
+            id: string;
+            prompt: string;
+            schedule_type: string;
+            schedule_value: string;
+            status: string;
+            next_run: string;
+          }) =>
             `- [${t.id}] ${t.prompt.slice(0, 50)}... (${t.schedule_type}: ${t.schedule_value}) - ${t.status}, next: ${t.next_run || 'N/A'}`,
         )
         .join('\n');
 
-      return { content: [{ type: 'text' as const, text: `Scheduled tasks:\n${formatted}` }] };
+      return {
+        content: [
+          { type: 'text' as const, text: `Scheduled tasks:\n${formatted}` },
+        ],
+      };
     } catch (err) {
       return {
-        content: [{ type: 'text' as const, text: `Error reading tasks: ${err instanceof Error ? err.message : String(err)}` }],
+        content: [
+          {
+            type: 'text' as const,
+            text: `Error reading tasks: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
       };
     }
   },
@@ -504,7 +695,14 @@ server.tool(
 
     writeIpcFile(TASKS_DIR, data);
 
-    return { content: [{ type: 'text' as const, text: `Task ${args.task_id} pause requested.` }] };
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Task ${args.task_id} pause requested.`,
+        },
+      ],
+    };
   },
 );
 
@@ -523,7 +721,14 @@ server.tool(
 
     writeIpcFile(TASKS_DIR, data);
 
-    return { content: [{ type: 'text' as const, text: `Task ${args.task_id} resume requested.` }] };
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Task ${args.task_id} resume requested.`,
+        },
+      ],
+    };
   },
 );
 
@@ -542,7 +747,14 @@ server.tool(
 
     writeIpcFile(TASKS_DIR, data);
 
-    return { content: [{ type: 'text' as const, text: `Task ${args.task_id} cancellation requested.` }] };
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Task ${args.task_id} cancellation requested.`,
+        },
+      ],
+    };
   },
 );
 
@@ -552,18 +764,32 @@ server.tool(
   {
     task_id: z.string().describe('The task ID to update'),
     prompt: z.string().optional().describe('New prompt for the task'),
-    schedule_type: z.enum(['cron', 'interval', 'once']).optional().describe('New schedule type'),
-    schedule_value: z.string().optional().describe('New schedule value (see schedule_task for format)'),
+    schedule_type: z
+      .enum(['cron', 'interval', 'once'])
+      .optional()
+      .describe('New schedule type'),
+    schedule_value: z
+      .string()
+      .optional()
+      .describe('New schedule value (see schedule_task for format)'),
   },
   async (args) => {
     // Validate schedule_value if provided
-    if (args.schedule_type === 'cron' || (!args.schedule_type && args.schedule_value)) {
+    if (
+      args.schedule_type === 'cron' ||
+      (!args.schedule_type && args.schedule_value)
+    ) {
       if (args.schedule_value) {
         try {
           CronExpressionParser.parse(args.schedule_value);
         } catch {
           return {
-            content: [{ type: 'text' as const, text: `Invalid cron: "${args.schedule_value}".` }],
+            content: [
+              {
+                type: 'text' as const,
+                text: `Invalid cron: "${args.schedule_value}".`,
+              },
+            ],
             isError: true,
           };
         }
@@ -573,7 +799,12 @@ server.tool(
       const ms = parseInt(args.schedule_value, 10);
       if (isNaN(ms) || ms <= 0) {
         return {
-          content: [{ type: 'text' as const, text: `Invalid interval: "${args.schedule_value}".` }],
+          content: [
+            {
+              type: 'text' as const,
+              text: `Invalid interval: "${args.schedule_value}".`,
+            },
+          ],
           isError: true,
         };
       }
@@ -587,12 +818,21 @@ server.tool(
       timestamp: new Date().toISOString(),
     };
     if (args.prompt !== undefined) data.prompt = args.prompt;
-    if (args.schedule_type !== undefined) data.schedule_type = args.schedule_type;
-    if (args.schedule_value !== undefined) data.schedule_value = args.schedule_value;
+    if (args.schedule_type !== undefined)
+      data.schedule_type = args.schedule_type;
+    if (args.schedule_value !== undefined)
+      data.schedule_value = args.schedule_value;
 
     writeIpcFile(TASKS_DIR, data);
 
-    return { content: [{ type: 'text' as const, text: `Task ${args.task_id} update requested.` }] };
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Task ${args.task_id} update requested.`,
+        },
+      ],
+    };
   },
 );
 
@@ -602,15 +842,28 @@ server.tool(
 
 Use available_groups.json to find the JID for a group. The folder name must be channel-prefixed: "{channel}_{group-name}" (e.g., "whatsapp_family-chat", "telegram_dev-team", "discord_general"). Use lowercase with hyphens for the group name part.`,
   {
-    jid: z.string().describe('The chat JID (e.g., "120363336345536173@g.us", "tg:-1001234567890", "dc:1234567890123456")'),
+    jid: z
+      .string()
+      .describe(
+        'The chat JID (e.g., "120363336345536173@g.us", "tg:-1001234567890", "dc:1234567890123456")',
+      ),
     name: z.string().describe('Display name for the group'),
-    folder: z.string().describe('Channel-prefixed folder name (e.g., "whatsapp_family-chat", "telegram_dev-team")'),
+    folder: z
+      .string()
+      .describe(
+        'Channel-prefixed folder name (e.g., "whatsapp_family-chat", "telegram_dev-team")',
+      ),
     trigger: z.string().describe('Trigger word (e.g., "@Andy")'),
   },
   async (args) => {
     if (!isMain) {
       return {
-        content: [{ type: 'text' as const, text: 'Only the main group can register new groups.' }],
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Only the main group can register new groups.',
+          },
+        ],
         isError: true,
       };
     }
@@ -627,7 +880,421 @@ Use available_groups.json to find the JID for a group. The folder name must be c
     writeIpcFile(TASKS_DIR, data);
 
     return {
-      content: [{ type: 'text' as const, text: `Group "${args.name}" registered. It will start receiving messages immediately.` }],
+      content: [
+        {
+          type: 'text' as const,
+          text: `Group "${args.name}" registered. It will start receiving messages immediately.`,
+        },
+      ],
+    };
+  },
+);
+
+server.tool(
+  'read_global_memory',
+  'Main group only. Read a file from global NanoClaw memory, defaulting to CLAUDE.md.',
+  {
+    file: z
+      .string()
+      .optional()
+      .describe(
+        'Relative file under groups/global, e.g. "CLAUDE.md" or "crew.md".',
+      ),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Only the main group can read global memory.',
+          },
+        ],
+        isError: true,
+      };
+    }
+    try {
+      const output = await requestHostAction('readGlobalMemory', {
+        file: args.file,
+      });
+      return { content: [{ type: 'text' as const, text: output }] };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `read_global_memory failed: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'write_global_memory',
+  'Main group only. Replace a file in global NanoClaw memory. The host creates a backup and audit entry before writing.',
+  {
+    content: z.string().describe('Complete replacement file content.'),
+    file: z
+      .string()
+      .optional()
+      .describe('Relative file under groups/global. Defaults to CLAUDE.md.'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Only the main group can write global memory.',
+          },
+        ],
+        isError: true,
+      };
+    }
+    try {
+      const output = await requestHostAction('writeGlobalMemory', {
+        file: args.file,
+        content: args.content,
+      });
+      return { content: [{ type: 'text' as const, text: output }] };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `write_global_memory failed: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'read_group_memory',
+  'Main group only. Read a file from a registered group folder, defaulting to CLAUDE.md.',
+  {
+    group_folder: z
+      .string()
+      .describe('Registered group folder, e.g. "telegram_main".'),
+    file: z
+      .string()
+      .optional()
+      .describe('Relative file under the group folder. Defaults to CLAUDE.md.'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Only the main group can read group memory.',
+          },
+        ],
+        isError: true,
+      };
+    }
+    try {
+      const output = await requestHostAction('readGroupMemory', {
+        group: args.group_folder,
+        file: args.file,
+      });
+      return { content: [{ type: 'text' as const, text: output }] };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `read_group_memory failed: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'write_group_memory',
+  'Main group only. Replace a file in a registered group folder. The host creates a backup and audit entry before writing.',
+  {
+    group_folder: z
+      .string()
+      .describe('Registered group folder, e.g. "telegram_main".'),
+    content: z.string().describe('Complete replacement file content.'),
+    file: z
+      .string()
+      .optional()
+      .describe('Relative file under the group folder. Defaults to CLAUDE.md.'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Only the main group can write group memory.',
+          },
+        ],
+        isError: true,
+      };
+    }
+    try {
+      const output = await requestHostAction('writeGroupMemory', {
+        group: args.group_folder,
+        file: args.file,
+        content: args.content,
+      });
+      return { content: [{ type: 'text' as const, text: output }] };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `write_group_memory failed: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'copy_memory_file_to_group',
+  'Main group only. Copy an allowlisted memory file from groups/global into a registered group folder. The host creates a backup and audit entry before writing.',
+  {
+    source_file: z
+      .string()
+      .describe('Relative source file under groups/global, e.g. "crew.md".'),
+    group_folder: z.string().describe('Registered target group folder.'),
+    target_file: z
+      .string()
+      .optional()
+      .describe(
+        'Relative target file under the group folder. Defaults to the source basename.',
+      ),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Only the main group can copy memory files.',
+          },
+        ],
+        isError: true,
+      };
+    }
+    try {
+      const output = await requestHostAction('copyMemoryFileToGroup', {
+        source: args.source_file,
+        group: args.group_folder,
+        target: args.target_file,
+      });
+      return { content: [{ type: 'text' as const, text: output }] };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `copy_memory_file_to_group failed: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'inspect_group_config',
+  'Main group only. Inspect registered group configuration. Omit group_folder to list every registered group.',
+  {
+    group_folder: z
+      .string()
+      .optional()
+      .describe('Registered group folder to inspect.'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Only the main group can inspect group config.',
+          },
+        ],
+        isError: true,
+      };
+    }
+    try {
+      const output = await requestHostAction('inspectGroupConfig', {
+        group: args.group_folder,
+      });
+      return { content: [{ type: 'text' as const, text: output }] };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `inspect_group_config failed: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'set_group_trigger_mode',
+  'Main group only. Set whether a registered group requires the assistant trigger before responding.',
+  {
+    group_folder: z.string().describe('Registered group folder.'),
+    requires_trigger: z
+      .boolean()
+      .describe(
+        'true = only respond when triggered; false = respond to plain messages.',
+      ),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Only the main group can set group trigger mode.',
+          },
+        ],
+        isError: true,
+      };
+    }
+    try {
+      const output = await requestHostAction('setGroupTriggerMode', {
+        group: args.group_folder,
+        requiresTrigger: args.requires_trigger,
+      });
+      return { content: [{ type: 'text' as const, text: output }] };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `set_group_trigger_mode failed: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'list_group_sessions',
+  'Main group only. Read the cross-group session JSONL index. The JSONL files themselves are mounted read-only at /workspace/group-sessions.',
+  {},
+  async () => {
+    if (!isMain) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Only the main group can list group sessions.',
+          },
+        ],
+        isError: true,
+      };
+    }
+    const indexPath = '/workspace/group-sessions/_nanoclaw-index.json';
+    try {
+      if (!fs.existsSync(indexPath)) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: `Session index not found at ${indexPath}.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+      return {
+        content: [
+          { type: 'text' as const, text: fs.readFileSync(indexPath, 'utf-8') },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `list_group_sessions failed: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'message_group_agent',
+  'Main group only. Send an admin-originated message into another registered group agent’s own context. The target agent replies back to main by default.',
+  {
+    group_folder: z.string().describe('Registered target group folder.'),
+    prompt: z.string().describe('Message for the target group agent.'),
+    reply_to: z
+      .enum(['main', 'target_group', 'both'])
+      .default('main')
+      .describe('Where the target agent result should be delivered.'),
+    context_mode: z
+      .enum(['group', 'isolated'])
+      .default('group')
+      .describe(
+        'group = resume the target group session; isolated = fresh one-off session.',
+      ),
+    allow_self_edit: z
+      .boolean()
+      .optional()
+      .describe(
+        'Default false. When false, the target agent is instructed to draft changes rather than editing its files.',
+      ),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Only the main group can message another group agent.',
+          },
+        ],
+        isError: true,
+      };
+    }
+    writeIpcFile(TASKS_DIR, {
+      type: 'message_group_agent',
+      groupFolder: args.group_folder,
+      prompt: args.prompt,
+      replyTo: args.reply_to,
+      contextMode: args.context_mode,
+      allowSelfEdit: args.allow_self_edit === true,
+      createdBy: groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Message queued for ${args.group_folder}.`,
+        },
+      ],
     };
   },
 );
@@ -639,10 +1306,23 @@ server.tool(
   'innernet_log',
   "Append an entry to Milan's personal innernet log. Use ONLY when Milan explicitly asks to log something (e.g. 'log that I went to the gym'). Never log proactively. Innernet auto-extracts tags from emoji/hashtags in the text, so the optional `tags` param is rarely needed.",
   {
-    text: z.string().describe('The log entry text. Include emoji/hashtags — innernet auto-extracts tags.'),
-    tags: z.string().optional().describe('Comma-separated tags (rarely needed; autotag handles it).'),
-    reflection: z.string().optional().describe('Optional reflection/note attached to the entry.'),
-    visibility: z.enum(['public', 'private']).optional().describe("Default 'public'. Use 'private' for sensitive content."),
+    text: z
+      .string()
+      .describe(
+        'The log entry text. Include emoji/hashtags — innernet auto-extracts tags.',
+      ),
+    tags: z
+      .string()
+      .optional()
+      .describe('Comma-separated tags (rarely needed; autotag handles it).'),
+    reflection: z
+      .string()
+      .optional()
+      .describe('Optional reflection/note attached to the entry.'),
+    visibility: z
+      .enum(['public', 'private'])
+      .optional()
+      .describe("Default 'public'. Use 'private' for sensitive content."),
   },
   async (args) => {
     const ACTIONS_DIR = path.join(IPC_DIR, 'actions');
@@ -656,8 +1336,12 @@ server.tool(
         op: 'log',
         text: args.text,
         ...(args.tags !== undefined ? { tags: args.tags } : {}),
-        ...(args.reflection !== undefined ? { reflection: args.reflection } : {}),
-        ...(args.visibility !== undefined ? { visibility: args.visibility } : {}),
+        ...(args.reflection !== undefined
+          ? { reflection: args.reflection }
+          : {}),
+        ...(args.visibility !== undefined
+          ? { visibility: args.visibility }
+          : {}),
       },
     });
 
@@ -673,7 +1357,12 @@ server.tool(
 
         if (!result.ok) {
           return {
-            content: [{ type: 'text' as const, text: `innernet_log failed: ${result.output}` }],
+            content: [
+              {
+                type: 'text' as const,
+                text: `innernet_log failed: ${result.output}`,
+              },
+            ],
             isError: true,
           };
         }
@@ -684,7 +1373,12 @@ server.tool(
     }
 
     return {
-      content: [{ type: 'text' as const, text: 'innernet_log timed out after 30 seconds.' }],
+      content: [
+        {
+          type: 'text' as const,
+          text: 'innernet_log timed out after 30 seconds.',
+        },
+      ],
       isError: true,
     };
   },
@@ -697,7 +1391,10 @@ server.tool(
   'innernet_read',
   "Read recent entries from Milan's personal innernet log. Use to ground analysis or answer questions like 'how's my week been?' or 'what have I logged about gym lately?'. Returns a JSON array of log entries (most recent first).",
   {
-    limit: z.number().optional().describe('Max entries to return (default 50).'),
+    limit: z
+      .number()
+      .optional()
+      .describe('Max entries to return (default 50).'),
   },
   async (args) => {
     const ACTIONS_DIR = path.join(IPC_DIR, 'actions');
@@ -725,7 +1422,12 @@ server.tool(
 
         if (!result.ok) {
           return {
-            content: [{ type: 'text' as const, text: `innernet_read failed: ${result.output}` }],
+            content: [
+              {
+                type: 'text' as const,
+                text: `innernet_read failed: ${result.output}`,
+              },
+            ],
             isError: true,
           };
         }
@@ -736,7 +1438,12 @@ server.tool(
     }
 
     return {
-      content: [{ type: 'text' as const, text: 'innernet_read timed out after 30 seconds.' }],
+      content: [
+        {
+          type: 'text' as const,
+          text: 'innernet_read timed out after 30 seconds.',
+        },
+      ],
       isError: true,
     };
   },
@@ -749,7 +1456,10 @@ server.tool(
   'chats_search',
   "Search Milan's ChatGPT conversation archive by title (case-insensitive substring). Returns most-recent-first list of {id, title, msg_count, update_time}. Pass no query (or empty) to get the recent slice. Note: title-only — a relevant chat with an unrelated title won't surface, so try synonyms if first search misses. Use chat_read with the returned id to fetch the markdown body.",
   {
-    query: z.string().optional().describe('Substring filter on title. Omit for recent chats.'),
+    query: z
+      .string()
+      .optional()
+      .describe('Substring filter on title. Omit for recent chats.'),
     limit: z.number().optional().describe('Max results (default 20).'),
   },
   async (args) => {
@@ -779,7 +1489,12 @@ server.tool(
 
         if (!result.ok) {
           return {
-            content: [{ type: 'text' as const, text: `chats_search failed: ${result.output}` }],
+            content: [
+              {
+                type: 'text' as const,
+                text: `chats_search failed: ${result.output}`,
+              },
+            ],
             isError: true,
           };
         }
@@ -790,7 +1505,12 @@ server.tool(
     }
 
     return {
-      content: [{ type: 'text' as const, text: 'chats_search timed out after 30 seconds.' }],
+      content: [
+        {
+          type: 'text' as const,
+          text: 'chats_search timed out after 30 seconds.',
+        },
+      ],
       isError: true,
     };
   },
@@ -803,7 +1523,9 @@ server.tool(
   'chat_read',
   "Read a ChatGPT chat from Milan's archive by id. Accepts the 8-char prefix from chats_search or a full uuid. Returns the chat as markdown.",
   {
-    id: z.string().describe('Chat id from chats_search (8-char prefix or full uuid).'),
+    id: z
+      .string()
+      .describe('Chat id from chats_search (8-char prefix or full uuid).'),
   },
   async (args) => {
     const ACTIONS_DIR = path.join(IPC_DIR, 'actions');
@@ -828,7 +1550,12 @@ server.tool(
 
         if (!result.ok) {
           return {
-            content: [{ type: 'text' as const, text: `chat_read failed: ${result.output}` }],
+            content: [
+              {
+                type: 'text' as const,
+                text: `chat_read failed: ${result.output}`,
+              },
+            ],
             isError: true,
           };
         }
@@ -839,7 +1566,12 @@ server.tool(
     }
 
     return {
-      content: [{ type: 'text' as const, text: 'chat_read timed out after 60 seconds.' }],
+      content: [
+        {
+          type: 'text' as const,
+          text: 'chat_read timed out after 60 seconds.',
+        },
+      ],
       isError: true,
     };
   },

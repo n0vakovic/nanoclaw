@@ -18,6 +18,7 @@ import {
 import {
   ContainerOutput,
   runContainerAgent,
+  writeGroupSessionsIndex,
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
@@ -298,6 +299,9 @@ async function runAgent(
     availableGroups,
     new Set(Object.keys(registeredGroups)),
   );
+  if (isMain) {
+    writeGroupSessionsIndex(registeredGroups);
+  }
 
   // Wrap onOutput to track session ID from streamed results
   const wrappedOnOutput = onOutput
@@ -344,6 +348,154 @@ async function runAgent(
     logger.error({ group: group.name, err }, 'Agent error');
     return 'error';
   }
+}
+
+function findRegisteredGroupByFolder(
+  groupFolder: string,
+): { jid: string; group: RegisteredGroup } | null {
+  const entry = Object.entries(registeredGroups).find(
+    ([, group]) => group.folder === groupFolder,
+  );
+  if (!entry) return null;
+  return { jid: entry[0], group: entry[1] };
+}
+
+async function messageGroupAgent(opts: {
+  sourceGroup: string;
+  targetGroupFolder: string;
+  prompt: string;
+  replyTo: 'main' | 'target_group' | 'both';
+  contextMode: 'group' | 'isolated';
+  allowSelfEdit: boolean;
+}): Promise<void> {
+  const target = findRegisteredGroupByFolder(opts.targetGroupFolder);
+  if (!target) {
+    throw new Error(`Target group not registered: ${opts.targetGroupFolder}`);
+  }
+
+  const source =
+    findRegisteredGroupByFolder(opts.sourceGroup) ||
+    Object.entries(registeredGroups)
+      .map(([jid, group]) => ({ jid, group }))
+      .find(({ group }) => group.isMain === true);
+  if (!source) throw new Error('Main group registration not found');
+
+  const taskId = `intergroup-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const sessionId =
+    opts.contextMode === 'group' ? sessions[target.group.folder] : undefined;
+
+  const wrappedPrompt = [
+    '[MAIN-GROUP MESSAGE]',
+    `Origin: ${source.group.name} (${opts.sourceGroup})`,
+    `Target group: ${target.group.name} (${target.group.folder})`,
+    `Reply mode: ${opts.replyTo}`,
+    `Context mode: ${opts.contextMode}`,
+    `Self-edit allowed: ${opts.allowSelfEdit ? 'yes' : 'no'}`,
+    '',
+    opts.allowSelfEdit
+      ? 'You may update files in your group folder only if the request explicitly calls for it.'
+      : 'Do not modify files in your group folder. If changes would help, draft the proposed change in your reply.',
+    '',
+    opts.prompt,
+  ].join('\n');
+
+  queue.enqueueTask(target.jid, taskId, async () => {
+    let closeTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleClose = () => {
+      if (closeTimer) return;
+      closeTimer = setTimeout(() => queue.closeStdin(target.jid), 10_000);
+    };
+    const sendTo = async (jid: string, rawText: string) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) {
+        logger.warn(
+          { jid },
+          'No channel owns JID, cannot send intergroup reply',
+        );
+        return;
+      }
+      const text = formatOutbound(rawText);
+      if (text) await channel.sendMessage(jid, text);
+    };
+
+    try {
+      const isTargetMain = target.group.isMain === true;
+      const tasks = getAllTasks();
+      writeTasksSnapshot(
+        target.group.folder,
+        isTargetMain,
+        tasks.map((t) => ({
+          id: t.id,
+          groupFolder: t.group_folder,
+          prompt: t.prompt,
+          schedule_type: t.schedule_type,
+          schedule_value: t.schedule_value,
+          status: t.status,
+          next_run: t.next_run,
+        })),
+      );
+      writeGroupsSnapshot(
+        target.group.folder,
+        isTargetMain,
+        getAvailableGroups(),
+        new Set(Object.keys(registeredGroups)),
+      );
+      if (isTargetMain) {
+        writeGroupSessionsIndex(registeredGroups);
+      }
+
+      const output = await runContainerAgent(
+        target.group,
+        {
+          prompt: wrappedPrompt,
+          sessionId,
+          groupFolder: target.group.folder,
+          chatJid: target.jid,
+          isMain: isTargetMain,
+          isScheduledTask: true,
+          assistantName: ASSISTANT_NAME,
+        },
+        (proc, containerName) =>
+          queue.registerProcess(
+            target.jid,
+            proc,
+            containerName,
+            target.group.folder,
+          ),
+        async (streamedOutput: ContainerOutput) => {
+          if (streamedOutput.newSessionId) {
+            sessions[target.group.folder] = streamedOutput.newSessionId;
+            setSession(target.group.folder, streamedOutput.newSessionId);
+          }
+          if (streamedOutput.result) {
+            const text = `[${target.group.name}]\n${streamedOutput.result}`;
+            if (opts.replyTo === 'main' || opts.replyTo === 'both') {
+              await sendTo(source.jid, text);
+            }
+            if (opts.replyTo === 'target_group' || opts.replyTo === 'both') {
+              await sendTo(target.jid, streamedOutput.result);
+            }
+            scheduleClose();
+          }
+          if (streamedOutput.status === 'success') {
+            queue.notifyIdle(target.jid);
+            scheduleClose();
+          }
+        },
+      );
+
+      if (output.newSessionId) {
+        sessions[target.group.folder] = output.newSessionId;
+        setSession(target.group.folder, output.newSessionId);
+      }
+      if (output.status === 'error') {
+        const errorText = `Inter-group message to ${target.group.name} failed: ${output.error || 'unknown error'}`;
+        await sendTo(source.jid, errorText);
+      }
+    } finally {
+      if (closeTimer) clearTimeout(closeTimer);
+    }
+  });
 }
 
 async function startMessageLoop(): Promise<void> {
@@ -653,6 +805,7 @@ async function main(): Promise<void> {
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) =>
       writeGroupsSnapshot(gf, im, ag, rj),
+    messageGroupAgent,
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();

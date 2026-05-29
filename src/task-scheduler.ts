@@ -6,6 +6,7 @@ import { ASSISTANT_NAME, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
 import {
   ContainerOutput,
   runContainerAgent,
+  writeGroupSessionsIndex,
   writeTasksSnapshot,
 } from './container-runner.js';
 import {
@@ -131,6 +132,9 @@ async function runTask(
 
   // Update tasks snapshot for container to read (filtered by group)
   const isMain = group.isMain === true;
+  if (isMain) {
+    writeGroupSessionsIndex(groups);
+  }
   const tasks = getAllTasks();
   writeTasksSnapshot(
     task.group_folder,

@@ -34,6 +34,14 @@ export interface IpcDeps {
     availableGroups: AvailableGroup[],
     registeredJids: Set<string>,
   ) => void;
+  messageGroupAgent?: (opts: {
+    sourceGroup: string;
+    targetGroupFolder: string;
+    prompt: string;
+    replyTo: 'main' | 'target_group' | 'both';
+    contextMode: 'group' | 'isolated';
+    allowSelfEdit: boolean;
+  }) => Promise<void>;
 }
 
 let ipcWatcherRunning = false;
@@ -297,6 +305,9 @@ export function startIpcWatcher(deps: IpcDeps): void {
               dispatchAction(request, {
                 sourceGroup,
                 groupIpcDir: path.join(ipcBaseDir, sourceGroup),
+                isMain,
+                registeredGroups: deps.registeredGroups,
+                updateRegisteredGroup: deps.registerGroup,
               })
                 .then((result) => {
                   fs.mkdirSync(actionResultsDir, { recursive: true });
@@ -362,6 +373,9 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
+    replyTo?: string;
+    contextMode?: string;
+    allowSelfEdit?: boolean;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -639,6 +653,65 @@ export async function processTaskIpc(
         );
       }
       break;
+
+    case 'message_group_agent': {
+      if (!isMain) {
+        logger.warn(
+          { sourceGroup },
+          'Unauthorized message_group_agent attempt blocked',
+        );
+        break;
+      }
+      if (!deps.messageGroupAgent) {
+        logger.warn('message_group_agent requested but dependency unavailable');
+        break;
+      }
+      if (!data.groupFolder || !isValidGroupFolder(data.groupFolder)) {
+        logger.warn(
+          { groupFolder: data.groupFolder },
+          'Invalid message_group_agent request - unsafe group folder',
+        );
+        break;
+      }
+      if (!data.prompt) {
+        logger.warn('Invalid message_group_agent request - missing prompt');
+        break;
+      }
+      const targetExists = Object.values(registeredGroups).some(
+        (group) => group.folder === data.groupFolder,
+      );
+      if (!targetExists) {
+        logger.warn(
+          { groupFolder: data.groupFolder },
+          'message_group_agent target group not registered',
+        );
+        break;
+      }
+      const replyTo =
+        data.replyTo === 'target_group' || data.replyTo === 'both'
+          ? data.replyTo
+          : 'main';
+      const contextMode =
+        data.contextMode === 'isolated' ? 'isolated' : 'group';
+      await deps.messageGroupAgent({
+        sourceGroup,
+        targetGroupFolder: data.groupFolder,
+        prompt: data.prompt,
+        replyTo,
+        contextMode,
+        allowSelfEdit: data.allowSelfEdit === true,
+      });
+      logger.info(
+        {
+          sourceGroup,
+          targetGroupFolder: data.groupFolder,
+          replyTo,
+          contextMode,
+        },
+        'message_group_agent queued',
+      );
+      break;
+    }
 
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');

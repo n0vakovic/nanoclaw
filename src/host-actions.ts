@@ -8,16 +8,22 @@
  */
 import fs from 'fs';
 import path from 'path';
+import { createHash } from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
 
-import { GITHUB_ALLOWLIST_PATH } from './config.js';
+import { DATA_DIR, GITHUB_ALLOWLIST_PATH, GROUPS_DIR } from './config.js';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
+import { isValidGroupFolder, resolveGroupFolderPath } from './group-folder.js';
 import { runSyncRepos } from './sync-action.js';
-import { GitHubAllowlist, GitHubPermissionTier } from './types.js';
+import {
+  GitHubAllowlist,
+  GitHubPermissionTier,
+  RegisteredGroup,
+} from './types.js';
 
 export interface ActionRequest {
   action: string;
@@ -41,6 +47,9 @@ export interface ActionResult {
 export interface ActionContext {
   sourceGroup: string;
   groupIpcDir: string;
+  isMain?: boolean;
+  registeredGroups?: () => Record<string, RegisteredGroup>;
+  updateRegisteredGroup?: (jid: string, group: RegisteredGroup) => void;
 }
 
 type ActionHandler = (
@@ -130,8 +139,263 @@ async function githubApi(
 }
 
 /* ------------------------------------------------------------------ */
+/*  Main-only memory/admin helper utilities                            */
+/* ------------------------------------------------------------------ */
+
+const DEFAULT_MEMORY_FILE = 'CLAUDE.md';
+const MEMORY_FILE_EXTENSIONS = new Set([
+  '.md',
+  '.txt',
+  '.json',
+  '.yaml',
+  '.yml',
+]);
+
+function assertMain(ctx?: ActionContext): asserts ctx is ActionContext {
+  if (!ctx?.isMain) {
+    throw new Error('This host action is restricted to the main group');
+  }
+}
+
+function ensureWithinBase(baseDir: string, resolvedPath: string): void {
+  const rel = path.relative(baseDir, resolvedPath);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new Error(`Path escapes base directory: ${resolvedPath}`);
+  }
+}
+
+function resolveMemoryFile(baseDir: string, file?: unknown): string {
+  const rel =
+    typeof file === 'string' && file.trim() ? file.trim() : DEFAULT_MEMORY_FILE;
+  if (path.isAbsolute(rel) || rel.includes('\\')) {
+    throw new Error(`Invalid memory file path "${rel}"`);
+  }
+  const parts = rel.split('/');
+  if (
+    parts.some(
+      (part) => !part || part === '.' || part === '..' || part.startsWith('.'),
+    )
+  ) {
+    throw new Error(`Invalid memory file path "${rel}"`);
+  }
+  if (!MEMORY_FILE_EXTENSIONS.has(path.extname(rel).toLowerCase())) {
+    throw new Error(
+      `Unsupported memory file extension "${path.extname(rel)}". Allowed: ${Array.from(MEMORY_FILE_EXTENSIONS).join(', ')}`,
+    );
+  }
+  const resolved = path.resolve(baseDir, rel);
+  ensureWithinBase(baseDir, resolved);
+  return resolved;
+}
+
+function backupFileIfPresent(filePath: string): string | null {
+  if (!fs.existsSync(filePath)) return null;
+  const backupRoot = path.join(DATA_DIR, 'admin-memory-backups');
+  fs.mkdirSync(backupRoot, { recursive: true });
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const rel = path.relative(GROUPS_DIR, filePath).replace(/[\\/]/g, '__');
+  const backupPath = path.join(backupRoot, `${timestamp}__${rel}`);
+  fs.copyFileSync(filePath, backupPath);
+  return backupPath;
+}
+
+function writeFileAtomic(filePath: string, content: string): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmpPath, content);
+  fs.renameSync(tmpPath, filePath);
+}
+
+function auditAdminMemory(
+  action: string,
+  ctx: ActionContext | undefined,
+  details: Record<string, unknown>,
+): void {
+  const auditPath = path.join(DATA_DIR, 'admin-memory-audit.jsonl');
+  fs.mkdirSync(path.dirname(auditPath), { recursive: true });
+  fs.appendFileSync(
+    auditPath,
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      action,
+      sourceGroup: ctx?.sourceGroup,
+      ...details,
+    }) + '\n',
+  );
+}
+
+function contentHash(content: string): string {
+  return createHash('sha256').update(content).digest('hex');
+}
+
+function findRegisteredGroupByFolder(
+  ctx: ActionContext,
+  groupFolder: string,
+): { jid: string; group: RegisteredGroup } {
+  const groups = ctx.registeredGroups?.() || {};
+  const entry = Object.entries(groups).find(
+    ([, group]) => group.folder === groupFolder,
+  );
+  if (!entry)
+    throw new Error(`No registered group found for folder "${groupFolder}"`);
+  return { jid: entry[0], group: entry[1] };
+}
+
+function parseGroupFolder(value: unknown): string {
+  if (typeof value !== 'string' || !isValidGroupFolder(value)) {
+    throw new Error(`Invalid group folder "${String(value)}"`);
+  }
+  return value;
+}
+
+/* ------------------------------------------------------------------ */
 
 const ACTION_REGISTRY: Record<string, ActionHandler> = {
+  readGlobalMemory: async (params, ctx) => {
+    assertMain(ctx);
+    const globalDir = path.join(GROUPS_DIR, 'global');
+    const filePath = resolveMemoryFile(globalDir, params?.file);
+    const exists = fs.existsSync(filePath);
+    return JSON.stringify({
+      file: path.relative(globalDir, filePath),
+      exists,
+      content: exists ? fs.readFileSync(filePath, 'utf-8') : null,
+    });
+  },
+
+  writeGlobalMemory: async (params, ctx) => {
+    assertMain(ctx);
+    const content = params?.content;
+    if (typeof content !== 'string') {
+      throw new Error('writeGlobalMemory: missing string params.content');
+    }
+    const globalDir = path.join(GROUPS_DIR, 'global');
+    const filePath = resolveMemoryFile(globalDir, params?.file);
+    const backupPath = backupFileIfPresent(filePath);
+    writeFileAtomic(filePath, content);
+    auditAdminMemory('writeGlobalMemory', ctx, {
+      file: path.relative(globalDir, filePath),
+      backupPath,
+      bytes: Buffer.byteLength(content),
+      sha256: contentHash(content),
+    });
+    return JSON.stringify({
+      file: path.relative(globalDir, filePath),
+      backupPath,
+      bytes: Buffer.byteLength(content),
+    });
+  },
+
+  readGroupMemory: async (params, ctx) => {
+    assertMain(ctx);
+    const groupFolder = parseGroupFolder(params?.group);
+    const groupDir = resolveGroupFolderPath(groupFolder);
+    const filePath = resolveMemoryFile(groupDir, params?.file);
+    const exists = fs.existsSync(filePath);
+    return JSON.stringify({
+      group: groupFolder,
+      file: path.relative(groupDir, filePath),
+      exists,
+      content: exists ? fs.readFileSync(filePath, 'utf-8') : null,
+    });
+  },
+
+  writeGroupMemory: async (params, ctx) => {
+    assertMain(ctx);
+    const groupFolder = parseGroupFolder(params?.group);
+    const content = params?.content;
+    if (typeof content !== 'string') {
+      throw new Error('writeGroupMemory: missing string params.content');
+    }
+    const groupDir = resolveGroupFolderPath(groupFolder);
+    const filePath = resolveMemoryFile(groupDir, params?.file);
+    const backupPath = backupFileIfPresent(filePath);
+    writeFileAtomic(filePath, content);
+    auditAdminMemory('writeGroupMemory', ctx, {
+      group: groupFolder,
+      file: path.relative(groupDir, filePath),
+      backupPath,
+      bytes: Buffer.byteLength(content),
+      sha256: contentHash(content),
+    });
+    return JSON.stringify({
+      group: groupFolder,
+      file: path.relative(groupDir, filePath),
+      backupPath,
+      bytes: Buffer.byteLength(content),
+    });
+  },
+
+  copyMemoryFileToGroup: async (params, ctx) => {
+    assertMain(ctx);
+    const groupFolder = parseGroupFolder(params?.group);
+    const sourceFile = resolveMemoryFile(
+      path.join(GROUPS_DIR, 'global'),
+      params?.source,
+    );
+    if (!fs.existsSync(sourceFile)) {
+      throw new Error(`Source memory file does not exist: ${params?.source}`);
+    }
+    const groupDir = resolveGroupFolderPath(groupFolder);
+    const targetFile = resolveMemoryFile(
+      groupDir,
+      params?.target || path.basename(sourceFile),
+    );
+    const content = fs.readFileSync(sourceFile, 'utf-8');
+    const backupPath = backupFileIfPresent(targetFile);
+    writeFileAtomic(targetFile, content);
+    auditAdminMemory('copyMemoryFileToGroup', ctx, {
+      group: groupFolder,
+      source: path.relative(path.join(GROUPS_DIR, 'global'), sourceFile),
+      target: path.relative(groupDir, targetFile),
+      backupPath,
+      bytes: Buffer.byteLength(content),
+      sha256: contentHash(content),
+    });
+    return JSON.stringify({
+      group: groupFolder,
+      source: path.relative(path.join(GROUPS_DIR, 'global'), sourceFile),
+      target: path.relative(groupDir, targetFile),
+      backupPath,
+      bytes: Buffer.byteLength(content),
+    });
+  },
+
+  inspectGroupConfig: async (params, ctx) => {
+    assertMain(ctx);
+    const groups = ctx.registeredGroups?.() || {};
+    if (params?.group !== undefined) {
+      const groupFolder = parseGroupFolder(params.group);
+      const { jid, group } = findRegisteredGroupByFolder(ctx, groupFolder);
+      return JSON.stringify({ jid, group });
+    }
+    return JSON.stringify(
+      Object.entries(groups).map(([jid, group]) => ({ jid, group })),
+    );
+  },
+
+  setGroupTriggerMode: async (params, ctx) => {
+    assertMain(ctx);
+    const groupFolder = parseGroupFolder(params?.group);
+    if (typeof params?.requiresTrigger !== 'boolean') {
+      throw new Error(
+        'setGroupTriggerMode: missing boolean params.requiresTrigger',
+      );
+    }
+    if (!ctx.updateRegisteredGroup) {
+      throw new Error('setGroupTriggerMode: registration updater unavailable');
+    }
+    const { jid, group } = findRegisteredGroupByFolder(ctx, groupFolder);
+    const updated = { ...group, requiresTrigger: params.requiresTrigger };
+    ctx.updateRegisteredGroup(jid, updated);
+    auditAdminMemory('setGroupTriggerMode', ctx, {
+      group: groupFolder,
+      jid,
+      requiresTrigger: params.requiresTrigger,
+    });
+    return JSON.stringify({ jid, group: updated });
+  },
+
   /**
    * Bidirectional sync between ~/coding and ~/damrassbot/sync.
    * Inbound: git pull every repo (skipping _third_party).
@@ -844,10 +1108,15 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
    *   Returns markdown body of the chat.
    */
   chats: async (params) => {
-    const env = readEnvFile(['ZNACHAI_API_KEY', 'ZNACHAI_READ_TOKEN', 'ZNACHAI_URL']);
+    const env = readEnvFile([
+      'ZNACHAI_API_KEY',
+      'ZNACHAI_READ_TOKEN',
+      'ZNACHAI_URL',
+    ]);
     const apiKey = process.env.ZNACHAI_API_KEY || env.ZNACHAI_API_KEY;
     const readToken = process.env.ZNACHAI_READ_TOKEN || env.ZNACHAI_READ_TOKEN;
-    const BASE = process.env.ZNACHAI_URL || env.ZNACHAI_URL || 'https://znachai.fly.dev';
+    const BASE =
+      process.env.ZNACHAI_URL || env.ZNACHAI_URL || 'https://znachai.fly.dev';
 
     const { op, query, limit, id } = (params || {}) as {
       op?: string;
@@ -883,7 +1152,9 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
         if (query && typeof query === 'string' && query.length > 0) {
           const q = query.toLowerCase();
           chats = chats.filter((c) =>
-            String(c.title ?? '').toLowerCase().includes(q),
+            String(c.title ?? '')
+              .toLowerCase()
+              .includes(q),
           );
         }
         const effectiveLimit = limit ?? 20;
@@ -894,7 +1165,12 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
           update_time: c.update_time ?? c.updated_at,
         }));
         logger.info(
-          { op, hasQuery: !!query, limit: effectiveLimit, returned: sliced.length },
+          {
+            op,
+            hasQuery: !!query,
+            limit: effectiveLimit,
+            returned: sliced.length,
+          },
           'chats completed',
         );
         return JSON.stringify(sliced);
