@@ -20,8 +20,10 @@ import { logger } from './logger.js';
 import { isValidGroupFolder, resolveGroupFolderPath } from './group-folder.js';
 import {
   acknowledgeIntergroupInboxItem,
+  createIntergroupInboxItem,
   listIntergroupInboxItems,
   parseInboxItemId,
+  queueIntergroupInboxNotification,
 } from './intergroup-inbox.js';
 import { runSyncRepos } from './sync-action.js';
 import {
@@ -594,6 +596,24 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
       null,
       2,
     );
+  },
+
+  surfaceToMain: async (params, ctx) => {
+    if (!ctx) throw new Error('surfaceToMain: missing action context');
+    const item = createIntergroupInboxItem({
+      sourceGroup: ctx.sourceGroup,
+      registeredGroups: ctx.registeredGroups?.() || {},
+      surfaceId:
+        typeof params?.surfaceId === 'string' ? params.surfaceId : undefined,
+      subject: typeof params?.subject === 'string' ? params.subject : undefined,
+      body: typeof params?.body === 'string' ? params.body : undefined,
+      priority:
+        typeof params?.priority === 'string' ? params.priority : undefined,
+    });
+    if (params?.notifyMainChat === true || item.priority === 'urgent') {
+      queueIntergroupInboxNotification(item);
+    }
+    return JSON.stringify(item, null, 2);
   },
 
   /**

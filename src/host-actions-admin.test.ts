@@ -250,4 +250,55 @@ describe('admin memory host actions', () => {
     );
     expect(JSON.parse(listedAfterAck.output).items).toHaveLength(0);
   });
+
+  it('surfaces to main synchronously from a non-main group', async () => {
+    const result = await dispatchAction(
+      {
+        action: 'surfaceToMain',
+        requestId: 'req-8',
+        params: {
+          surfaceId: 'surface-sync-test',
+          subject: 'Sync surface',
+          body: 'This should exist before the tool returns',
+          priority: 'normal',
+        },
+      },
+      {
+        sourceGroup: 'other-group',
+        groupIpcDir: '/tmp/ipc-other',
+        isMain: false,
+        registeredGroups: () => ({
+          'main@g.us': {
+            name: 'Main',
+            folder: 'telegram_main',
+            trigger: 'always',
+            added_at: '2024-01-01T00:00:00.000Z',
+            isMain: true,
+          },
+          'other@g.us': {
+            name: 'Other',
+            folder: 'other-group',
+            trigger: '@Andy',
+            added_at: '2024-01-01T00:00:00.000Z',
+          },
+        }),
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    const item = JSON.parse(result.output);
+    expect(item.id).toBe('surface-sync-test');
+    expect(item.sourceGroup).toBe('other-group');
+    expect(
+      fs.existsSync(
+        path.join(
+          testPaths.dataDir,
+          'ipc',
+          'telegram_main',
+          'intergroup-inbox',
+          'surface-sync-test.json',
+        ),
+      ),
+    ).toBe(true);
+  });
 });

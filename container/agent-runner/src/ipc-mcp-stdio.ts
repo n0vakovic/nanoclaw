@@ -1354,32 +1354,30 @@ server.tool(
       };
     }
     const surfaceId = `surface-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    writeIpcFile(TASKS_DIR, {
-      type: 'surface_to_main',
-      surfaceId,
-      subject: args.subject,
-      body: args.body,
-      priority: args.priority,
-      notifyMainChat: args.notify_main_chat === true,
-      createdBy: groupFolder,
-      timestamp: new Date().toISOString(),
-    });
-    return {
-      content: [
+    try {
+      const output = await requestHostAction(
+        'surfaceToMain',
         {
-          type: 'text' as const,
-          text: JSON.stringify(
-            {
-              id: surfaceId,
-              status: 'surfaced',
-              priority: args.priority,
-            },
-            null,
-            2,
-          ),
+          surfaceId,
+          subject: args.subject,
+          body: args.body,
+          priority: args.priority,
+          notifyMainChat: args.notify_main_chat === true,
         },
-      ],
-    };
+        30_000,
+      );
+      return { content: [{ type: 'text' as const, text: output }] };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `surface_to_main failed: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
   },
 );
 

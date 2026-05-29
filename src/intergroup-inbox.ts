@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR } from './config.js';
+import { RegisteredGroup } from './types.js';
 
 export type IntergroupInboxPriority = 'low' | 'normal' | 'high' | 'urgent';
 
@@ -53,6 +54,54 @@ function writeJsonAtomic(filePath: string, data: unknown): void {
   fs.renameSync(tmpPath, filePath);
 }
 
+export function createIntergroupInboxItem(opts: {
+  sourceGroup: string;
+  registeredGroups: Record<string, RegisteredGroup>;
+  surfaceId?: string;
+  subject?: string;
+  body?: string;
+  priority?: string;
+}): IntergroupInboxItem {
+  const sourceEntry = Object.entries(opts.registeredGroups).find(
+    ([, group]) => group.folder === opts.sourceGroup,
+  );
+  const mainEntry = Object.entries(opts.registeredGroups).find(
+    ([, group]) => group.isMain === true,
+  );
+  if (!sourceEntry || !mainEntry) {
+    throw new Error('Missing registered source or main group');
+  }
+
+  const [sourceJid, source] = sourceEntry;
+  const [mainJid, main] = mainEntry;
+  if (source.folder === main.folder) {
+    throw new Error('Main group cannot surface to itself');
+  }
+  if (typeof opts.body !== 'string' || !opts.body.trim()) {
+    throw new Error('surface_to_main requires a non-empty body');
+  }
+
+  const item = {
+    id:
+      opts.surfaceId ||
+      `surface-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    sourceGroup: opts.sourceGroup,
+    sourceName: source.name,
+    sourceJid,
+    mainGroup: main.folder,
+    mainJid,
+    subject:
+      typeof opts.subject === 'string' && opts.subject.trim()
+        ? opts.subject.trim()
+        : `Surfaced from ${source.name}`,
+    body: opts.body.trim(),
+    priority: parseInboxPriority(opts.priority),
+    createdAt: new Date().toISOString(),
+  };
+
+  return writeIntergroupInboxItem(item);
+}
+
 export function writeIntergroupInboxItem(
   item: IntergroupInboxItem,
 ): IntergroupInboxItem {
@@ -63,6 +112,23 @@ export function writeIntergroupInboxItem(
   fs.mkdirSync(path.dirname(auditPath), { recursive: true });
   fs.appendFileSync(auditPath, JSON.stringify(item) + '\n');
   return item;
+}
+
+export function queueIntergroupInboxNotification(
+  item: IntergroupInboxItem,
+): void {
+  const messagesDir = path.join(DATA_DIR, 'ipc', item.mainGroup, 'messages');
+  const messagePath = path.join(
+    messagesDir,
+    `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`,
+  );
+  writeJsonAtomic(messagePath, {
+    type: 'message',
+    chatJid: item.mainJid,
+    text: `[${item.priority.toUpperCase()} from ${item.sourceName}]\n${item.subject}\n\n${item.body}`,
+    groupFolder: item.mainGroup,
+    timestamp: new Date().toISOString(),
+  });
 }
 
 export function listIntergroupInboxItems(
