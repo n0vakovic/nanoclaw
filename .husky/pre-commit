@@ -1,1 +1,10 @@
-npm run format:fix
+#!/usr/bin/env sh
+# Format staged .ts files under src/ and restage them, so prettier's
+# rewrites land in the same commit instead of as a perpetual unstaged diff.
+
+FILES=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '^src/.*\.ts$' || true)
+
+if [ -n "$FILES" ]; then
+  echo "$FILES" | xargs npx prettier --write
+  echo "$FILES" | xargs git add
+fi
