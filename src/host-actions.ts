@@ -14,8 +14,14 @@ import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
 
-import { DATA_DIR, GITHUB_ALLOWLIST_PATH, GROUPS_DIR } from './config.js';
+import {
+  DATA_DIR,
+  GITHUB_ALLOWLIST_PATH,
+  GROUPS_DIR,
+  HOST_ACTION_FETCH_TIMEOUT_MS,
+} from './config.js';
 import { readEnvFile } from './env.js';
+import { fetchWithTimeout } from './timeout.js';
 import { logger } from './logger.js';
 import { isValidGroupFolder, resolveGroupFolderPath } from './group-folder.js';
 import {
@@ -128,16 +134,20 @@ async function githubApi(
   token: string,
   body?: Record<string, unknown>,
 ): Promise<{ text: string; hasNextPage: boolean }> {
-  const res = await fetch(`https://api.github.com${urlPath}`, {
-    method,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2022-11-28',
-      ...(body ? { 'Content-Type': 'application/json' } : {}),
+  const res = await fetchWithTimeout(
+    `https://api.github.com${urlPath}`,
+    HOST_ACTION_FETCH_TIMEOUT_MS,
+    {
+      method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        ...(body ? { 'Content-Type': 'application/json' } : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
     },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  );
   const text = await res.text();
   if (!res.ok) throw new Error(`GitHub ${res.status}: ${text}`);
   const link = res.headers.get('link') || '';
@@ -680,8 +690,9 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
         'ttsSpeak: no voice_id/voice provided and ELEVENLABS_VOICE_ID not set',
       );
 
-    const res = await fetch(
+    const res = await fetchWithTimeout(
       `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
+      HOST_ACTION_FETCH_TIMEOUT_MS,
       {
         method: 'POST',
         headers: {
@@ -752,10 +763,14 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
       url.searchParams.set(k, v);
     }
 
-    const res = await fetch(url.toString(), {
-      method: 'GET',
-      headers: { Authorization: `Bearer ${bearerToken}` },
-    });
+    const res = await fetchWithTimeout(
+      url.toString(),
+      HOST_ACTION_FETCH_TIMEOUT_MS,
+      {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${bearerToken}` },
+      },
+    );
     const text = await res.text();
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${text}`);
     return text;
@@ -922,14 +937,18 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
     url.searchParams.set('radius', String(Math.min(radius || 500, 100000)));
     url.searchParams.set('limit', String(Math.min(limit || 5, 50)));
 
-    const res = await fetch(url.toString(), {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        Accept: 'application/json',
-        'X-Places-Api-Version': '2025-06-17',
+    const res = await fetchWithTimeout(
+      url.toString(),
+      HOST_ACTION_FETCH_TIMEOUT_MS,
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          Accept: 'application/json',
+          'X-Places-Api-Version': '2025-06-17',
+        },
       },
-    });
+    );
 
     if (!res.ok) {
       const body = await res.text();
@@ -1239,10 +1258,14 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
 
     switch (op) {
       case 'read': {
-        const res = await fetch(`${BASE}/logs`, {
-          method: 'GET',
-          headers: { Authorization: `Bearer ${token}` },
-        });
+        const res = await fetchWithTimeout(
+          `${BASE}/logs`,
+          HOST_ACTION_FETCH_TIMEOUT_MS,
+          {
+            method: 'GET',
+            headers: { Authorization: `Bearer ${token}` },
+          },
+        );
         const body = await res.text();
         if (!res.ok) throw new Error(`Innernet ${res.status}: ${body}`);
         let parsed: unknown;
@@ -1281,14 +1304,18 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
           visibility: visibility ?? 'public',
           timestamp: new Date().toISOString(),
         };
-        const res = await fetch(`${BASE}/log`, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'Content-Type': 'application/json',
+        const res = await fetchWithTimeout(
+          `${BASE}/log`,
+          HOST_ACTION_FETCH_TIMEOUT_MS,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(payload),
           },
-          body: JSON.stringify(payload),
-        });
+        );
         const body = await res.text();
         if (!res.ok) throw new Error(`Innernet ${res.status}: ${body}`);
         let result: string;
@@ -1349,9 +1376,13 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
 
     const fetchIndex = async (): Promise<Array<Record<string, unknown>>> => {
       if (!apiKey) throw new Error('ZNACHAI_API_KEY not set');
-      const res = await fetch(`${BASE}/api/chatgpt/chats`, {
-        headers: { 'X-API-Key': apiKey },
-      });
+      const res = await fetchWithTimeout(
+        `${BASE}/api/chatgpt/chats`,
+        HOST_ACTION_FETCH_TIMEOUT_MS,
+        {
+          headers: { 'X-API-Key': apiKey },
+        },
+      );
       const body = await res.text();
       if (!res.ok) throw new Error(`znachai ${res.status}: ${body}`);
       let parsed: unknown;
@@ -1418,7 +1449,7 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
           fullId = String(matches[0].id);
         }
         const url = `${BASE}/chats/${fullId}.md?token=${encodeURIComponent(readToken)}`;
-        const res = await fetch(url);
+        const res = await fetchWithTimeout(url, HOST_ACTION_FETCH_TIMEOUT_MS);
         const body = await res.text();
         if (!res.ok) throw new Error(`znachai ${res.status}: ${body}`);
         logger.info({ op, id: fullId, bytes: body.length }, 'chats completed');

@@ -1,7 +1,11 @@
 import OpenAI from 'openai';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
-import { PAUSE_THRESHOLD_S, LONG_PAUSE_THRESHOLD_S } from './config.js';
+import {
+  PAUSE_THRESHOLD_S,
+  LONG_PAUSE_THRESHOLD_S,
+  TRANSCRIPTION_TIMEOUT_MS,
+} from './config.js';
 
 const FALLBACK = '[Voice message — transcription unavailable]';
 
@@ -41,7 +45,14 @@ export async function transcribeAudio(
   }
 
   try {
-    const openai = new OpenAI({ apiKey });
+    // Bound the Whisper call: the SDK default is ~10min/attempt, long enough to
+    // pin the (sequential) voice handler for minutes. Cap it so a slow/stalled
+    // call degrades to fallback text quickly. See docs/concurrency-model.md.
+    const openai = new OpenAI({
+      apiKey,
+      timeout: TRANSCRIPTION_TIMEOUT_MS,
+      maxRetries: 1,
+    });
     const file = new File([audioBuffer], filename, { type: 'audio/ogg' });
     const result = await openai.audio.transcriptions.create({
       model: 'whisper-1',

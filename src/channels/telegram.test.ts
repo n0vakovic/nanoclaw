@@ -12,6 +12,10 @@ vi.mock('../env.js', () => ({ readEnvFile: vi.fn(() => ({})) }));
 vi.mock('../config.js', () => ({
   ASSISTANT_NAME: 'Andy',
   TRIGGER_PATTERN: /^@Andy\b/i,
+  TELEGRAM_API_TIMEOUT_MS: 30000,
+  TELEGRAM_HANDLER_TIMEOUT_MS: 60000,
+  TELEGRAM_MEDIA_TIMEOUT_MS: 15000,
+  TRANSCRIPTION_TIMEOUT_MS: 20000,
 }));
 
 // Mock logger
@@ -21,6 +25,19 @@ vi.mock('../logger.js', () => ({
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
+  },
+}));
+
+// Mock transcription: transcribeAudio is controllable per-test; formatTranscript
+// mirrors the real pure formatter so existing voice tests keep their behavior.
+const transcribeAudioMock = vi.hoisted(() => vi.fn());
+vi.mock('../transcription.js', () => ({
+  transcribeAudio: transcribeAudioMock,
+  formatTranscript: (transcript: string | null, caption?: string) => {
+    const suffix = caption ? ` ${caption}` : '';
+    if (!transcript)
+      return `[Voice message — transcription unavailable]${suffix}`;
+    return `[Voice: ${transcript}]${suffix}`;
   },
 }));
 
@@ -35,16 +52,23 @@ vi.mock('grammy', () => ({
     token: string;
     commandHandlers = new Map<string, Handler>();
     filterHandlers = new Map<string, Handler[]>();
+    middlewares: Handler[] = [];
     errorHandler: Handler | null = null;
 
     api = {
       sendMessage: vi.fn().mockResolvedValue(undefined),
       sendChatAction: vi.fn().mockResolvedValue(undefined),
+      getFile: vi.fn().mockResolvedValue({ file_path: 'voice/file_42.ogg' }),
+      config: { use: vi.fn() },
     };
 
     constructor(token: string) {
       this.token = token;
       botRef.current = this;
+    }
+
+    use(handler: Handler) {
+      this.middlewares.push(handler);
     }
 
     command(name: string, handler: Handler) {
@@ -216,6 +240,26 @@ describe('TelegramChannel', () => {
       expect(currentBot().filterHandlers.has('message:sticker')).toBe(true);
       expect(currentBot().filterHandlers.has('message:location')).toBe(true);
       expect(currentBot().filterHandlers.has('message:contact')).toBe(true);
+    });
+
+    it('installs the outbound api-timeout transformer on connect', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+
+      await channel.connect();
+
+      // Guards the IPC watcher / container output chain from a stalled send.
+      expect(currentBot().api.config.use).toHaveBeenCalledOnce();
+    });
+
+    it('installs an inbound handler-timeout middleware on connect', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+
+      await channel.connect();
+
+      // Guards grammy's sequential poll loop from a hung handler.
+      expect(currentBot().middlewares.length).toBeGreaterThanOrEqual(1);
     });
 
     it('registers error handler on connect', async () => {
@@ -421,6 +465,80 @@ describe('TelegramChannel', () => {
     });
   });
 
+  // --- quoted voice re-fetch (reply to a voice note) ---
+
+  describe('quoted voice re-fetch', () => {
+    function createReplyToVoiceCtx(voiceFileId: string, replyText: string) {
+      return {
+        chat: { id: 100200300, type: 'group', title: 'Test Group' },
+        from: { id: 99001, first_name: 'Alice', username: 'alice_user' },
+        message: {
+          text: replyText,
+          date: Math.floor(Date.now() / 1000),
+          message_id: 2,
+          entities: [],
+          reply_to_message: {
+            voice: { file_id: voiceFileId },
+            from: { is_bot: false },
+          },
+        },
+        me: { username: 'andy_ai_bot' },
+        reply: vi.fn(),
+      };
+    }
+
+    it('transcribes the quoted voice note instead of asking to resend', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          arrayBuffer: async () => new ArrayBuffer(8),
+        }),
+      );
+      transcribeAudioMock.mockResolvedValueOnce(
+        'the words in the missed voice note',
+      );
+
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createReplyToVoiceCtx('VOICE_42', 'you never processed this');
+      await triggerTextMessage(ctx as any);
+
+      // It fetched the quoted voice by its file_id rather than dropping it.
+      expect(currentBot().api.getFile).toHaveBeenCalledWith('VOICE_42');
+      // The transcript is surfaced to the agent in the reply context.
+      const delivered = (opts.onMessage as any).mock.calls[0][1];
+      expect(delivered.content).toContain('the words in the missed voice note');
+      expect(delivered.content).toContain('you never processed this');
+
+      vi.unstubAllGlobals();
+    });
+
+    it('falls back to a placeholder when the quoted voice cannot be transcribed', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          arrayBuffer: async () => new ArrayBuffer(8),
+        }),
+      );
+      transcribeAudioMock.mockResolvedValueOnce(null);
+
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createReplyToVoiceCtx('VOICE_99', 'this one');
+      await triggerTextMessage(ctx as any);
+
+      const delivered = (opts.onMessage as any).mock.calls[0][1];
+      expect(delivered.content).toContain('[voice]');
+      expect(delivered.content).toContain('this one');
+
+      vi.unstubAllGlobals();
+    });
+  });
+
   // --- @mention translation ---
 
   describe('@mention translation', () => {
@@ -593,7 +711,9 @@ describe('TelegramChannel', () => {
 
       expect(opts.onMessage).toHaveBeenCalledWith(
         'tg:100200300',
-        expect.objectContaining({ content: '[Voice message]' }),
+        expect.objectContaining({
+          content: '[Voice message — transcription unavailable]',
+        }),
       );
     });
 
@@ -728,6 +848,7 @@ describe('TelegramChannel', () => {
       expect(currentBot().api.sendMessage).toHaveBeenCalledWith(
         '100200300',
         'Hello',
+        expect.objectContaining({ parse_mode: 'Markdown' }),
       );
     });
 
@@ -741,6 +862,7 @@ describe('TelegramChannel', () => {
       expect(currentBot().api.sendMessage).toHaveBeenCalledWith(
         '-1001234567890',
         'Group message',
+        expect.objectContaining({ parse_mode: 'Markdown' }),
       );
     });
 
@@ -757,11 +879,13 @@ describe('TelegramChannel', () => {
         1,
         '100200300',
         'x'.repeat(4096),
+        expect.objectContaining({ parse_mode: 'Markdown' }),
       );
       expect(currentBot().api.sendMessage).toHaveBeenNthCalledWith(
         2,
         '100200300',
         'x'.repeat(904),
+        expect.objectContaining({ parse_mode: 'Markdown' }),
       );
     });
 
