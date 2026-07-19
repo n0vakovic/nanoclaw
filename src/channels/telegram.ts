@@ -2,12 +2,24 @@ import fs from 'fs';
 import path from 'path';
 
 import { Api, Bot, InputFile } from 'grammy';
+import type { Transformer } from 'grammy';
 
-import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
+import {
+  ASSISTANT_NAME,
+  TRIGGER_PATTERN,
+  TELEGRAM_API_TIMEOUT_MS,
+  TELEGRAM_HANDLER_TIMEOUT_MS,
+  TELEGRAM_MEDIA_TIMEOUT_MS,
+} from '../config.js';
 import { readEnvFile } from '../env.js';
 import { resolveGroupIpcPath } from '../group-folder.js';
 import { logger } from '../logger.js';
 import { transcribeAudio, formatTranscript } from '../transcription.js';
+import { fetchWithTimeout } from '../timeout.js';
+import {
+  createHandlerTimeoutMiddleware,
+  createApiTimeoutTransformer,
+} from '../bot-guards.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
@@ -50,11 +62,21 @@ async function sendTelegramMessage(
  * is a reply to a previous one. Returns `body` unchanged if no reply context.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function wrapReplyContext(replyTo: any, body: string): string {
+function wrapReplyContext(
+  replyTo: any,
+  body: string,
+  // When we've transcribed a quoted voice note, pass the transcript as
+  // quotedOverride with a larger maxLen so the agent sees the actual content
+  // the user is pointing back at — not a truncated 200-char snippet.
+  opts: { quotedOverride?: string; maxLen?: number } = {},
+): string {
   if (!replyTo) return body;
 
+  const maxLen = opts.maxLen ?? 200;
   let quoted: string;
-  if (typeof replyTo.text === 'string' && replyTo.text.length > 0) {
+  if (opts.quotedOverride) {
+    quoted = opts.quotedOverride;
+  } else if (typeof replyTo.text === 'string' && replyTo.text.length > 0) {
     quoted = replyTo.text;
   } else if (
     typeof replyTo.caption === 'string' &&
@@ -77,8 +99,8 @@ function wrapReplyContext(replyTo: any, body: string): string {
     quoted = '[message]';
   }
 
-  if (quoted.length > 200) {
-    quoted = quoted.slice(0, 200) + '…';
+  if (quoted.length > maxLen) {
+    quoted = quoted.slice(0, maxLen) + '…';
   }
   // Escape for safe embedding in the XML-style wrapper attribute
   const escaped = quoted
@@ -119,8 +141,72 @@ export class TelegramChannel implements Channel {
     this.opts = opts;
   }
 
+  /**
+   * Download and transcribe a quoted voice/audio message by its file_id.
+   * Everything needed is already on Telegram, so replying to a voice note the
+   * bot missed should recover its content — never ask the user to resend.
+   * Returns null if there's no audio to fetch or transcription fails.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async transcribeQuotedAudio(replyTo: any): Promise<string | null> {
+    if (!this.bot) return null;
+    const media = replyTo?.voice || replyTo?.audio;
+    const fileId = media?.file_id;
+    if (!fileId) return null;
+    try {
+      const file = await this.bot.api.getFile(fileId);
+      const url = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
+      const resp = await fetchWithTimeout(url, TELEGRAM_MEDIA_TIMEOUT_MS);
+      const buffer = Buffer.from(await resp.arrayBuffer());
+      return await transcribeAudio(buffer);
+    } catch (err) {
+      logger.error({ err }, 'Failed to transcribe quoted voice message');
+      return null;
+    }
+  }
+
+  /**
+   * Build the <reply_to> context for an inbound message. If it quotes a voice
+   * or audio message (and has no text/caption of its own), transcribe that
+   * quoted audio and surface the transcript instead of a bare [voice] marker.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async enrichReplyContext(
+    replyTo: any,
+    body: string,
+  ): Promise<string> {
+    const quotesAudio = replyTo && (replyTo.voice || replyTo.audio);
+    const hasOwnText =
+      (typeof replyTo?.text === 'string' && replyTo.text.length > 0) ||
+      (typeof replyTo?.caption === 'string' && replyTo.caption.length > 0);
+    if (quotesAudio && !hasOwnText) {
+      const transcript = await this.transcribeQuotedAudio(replyTo);
+      if (transcript) {
+        return wrapReplyContext(replyTo, body, {
+          quotedOverride: `[voice: ${transcript}]`,
+          maxLen: 4000,
+        });
+      }
+    }
+    return wrapReplyContext(replyTo, body);
+  }
+
   async connect(): Promise<void> {
     this.bot = new Bot(this.botToken);
+
+    // Outbound backstop: every bot.api.* call gets a hard timeout so a stalled
+    // Telegram send can never freeze the IPC watcher or container output chain.
+    this.bot.api.config.use(
+      createApiTimeoutTransformer(
+        TELEGRAM_API_TIMEOUT_MS,
+      ) as unknown as Transformer,
+    );
+
+    // Inbound backstop: grammy processes updates sequentially, so one hung
+    // handler would freeze the whole poll loop. Registered FIRST so it wraps
+    // every command/message handler below — no update can block longer than
+    // its budget. See docs/concurrency-model.md.
+    this.bot.use(createHandlerTimeoutMiddleware(TELEGRAM_HANDLER_TIMEOUT_MS));
 
     // Command to get chat ID (useful for registration)
     this.bot.command('chatid', (ctx) => {
@@ -183,8 +269,9 @@ export class TelegramChannel implements Channel {
         }
       }
 
-      // If this is a reply to another message, surface that context to the agent
-      content = wrapReplyContext(
+      // If this is a reply to another message, surface that context to the
+      // agent — transcribing a quoted voice note if there is one.
+      content = await this.enrichReplyContext(
         (ctx.message as any).reply_to_message,
         content,
       );
@@ -304,7 +391,7 @@ export class TelegramChannel implements Channel {
         const largest = photos[photos.length - 1];
         const file = await ctx.api.getFile(largest.file_id);
         const url = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
-        const resp = await fetch(url);
+        const resp = await fetchWithTimeout(url, TELEGRAM_MEDIA_TIMEOUT_MS);
         const buffer = Buffer.from(await resp.arrayBuffer());
 
         const ext = path.extname(file.file_path || '').toLowerCase() || '.jpg';
@@ -370,7 +457,7 @@ export class TelegramChannel implements Channel {
       try {
         const file = await ctx.getFile();
         const url = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
-        const resp = await fetch(url);
+        const resp = await fetchWithTimeout(url, TELEGRAM_MEDIA_TIMEOUT_MS);
         const buffer = Buffer.from(await resp.arrayBuffer());
         const transcript = await transcribeAudio(buffer);
         content = formatTranscript(transcript, caption);

@@ -23,6 +23,36 @@ export const PAUSE_THRESHOLD_S = 1.0;
 export const LONG_PAUSE_THRESHOLD_S = 2.0;
 export const SCHEDULER_POLL_INTERVAL = 60000;
 
+// Bounded-time budgets for the Telegram bot's two sequential loops (grammy
+// update polling + IPC watcher). See docs/concurrency-model.md. Ordering
+// matters: a media download / transcription must time out BEFORE the inbound
+// handler backstop, so a stalled request degrades to fallback text and the
+// message is still stored rather than being abandoned wholesale.
+export const TELEGRAM_MEDIA_TIMEOUT_MS = parseInt(
+  process.env.TELEGRAM_MEDIA_TIMEOUT_MS || '15000',
+  10,
+); // per media download (getFile + file fetch)
+export const TRANSCRIPTION_TIMEOUT_MS = parseInt(
+  process.env.TRANSCRIPTION_TIMEOUT_MS || '20000',
+  10,
+); // Whisper call
+export const TELEGRAM_API_TIMEOUT_MS = parseInt(
+  process.env.TELEGRAM_API_TIMEOUT_MS || '30000',
+  10,
+); // every outbound bot.api.* call
+export const TELEGRAM_HANDLER_TIMEOUT_MS = parseInt(
+  process.env.TELEGRAM_HANDLER_TIMEOUT_MS || '60000',
+  10,
+); // inbound handler backstop; must exceed media + transcription budgets
+
+// Hard timeout for outbound fetch() calls in host-actions (GitHub, Todoist,
+// ElevenLabs, xAI-adjacent integrations). Node's global fetch has no default
+// timeout, so a stalled connection would hang the host action indefinitely.
+export const HOST_ACTION_FETCH_TIMEOUT_MS = parseInt(
+  process.env.HOST_ACTION_FETCH_TIMEOUT_MS || '30000',
+  10,
+);
+
 // Absolute paths needed for container mounts
 const PROJECT_ROOT = process.cwd();
 export const HOME_DIR = process.env.HOME || os.homedir();

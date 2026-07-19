@@ -70,6 +70,11 @@ let lastTimestamp = '';
 let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
+// Watermark of what the agent has actually FINISHED processing (a container
+// query completed), as opposed to lastAgentTimestamp which advances the moment
+// a message is handed off / piped. Crash recovery keys off this so a message
+// piped into a container that then died is re-delivered instead of lost.
+let lastConfirmedTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 
 const channels: Channel[] = [];
@@ -84,6 +89,18 @@ function loadState(): void {
     logger.warn('Corrupted last_agent_timestamp in DB, resetting');
     lastAgentTimestamp = {};
   }
+  const confirmedTs = getRouterState('last_confirmed_timestamp');
+  try {
+    // Migration default: absent → trust the existing handoff cursor, so an
+    // upgrade doesn't reprocess the whole backlog. It then lags only for
+    // genuinely in-flight messages going forward.
+    lastConfirmedTimestamp = confirmedTs
+      ? JSON.parse(confirmedTs)
+      : { ...lastAgentTimestamp };
+  } catch {
+    logger.warn('Corrupted last_confirmed_timestamp in DB, resetting');
+    lastConfirmedTimestamp = { ...lastAgentTimestamp };
+  }
   sessions = getAllSessions();
   registeredGroups = getAllRegisteredGroups();
   logger.info(
@@ -95,6 +112,10 @@ function loadState(): void {
 function saveState(): void {
   setRouterState('last_timestamp', lastTimestamp);
   setRouterState('last_agent_timestamp', JSON.stringify(lastAgentTimestamp));
+  setRouterState(
+    'last_confirmed_timestamp',
+    JSON.stringify(lastConfirmedTimestamp),
+  );
 }
 
 function registerGroup(jid: string, group: RegisteredGroup): void {
@@ -233,6 +254,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
 
     if (result.status === 'success') {
+      // A container query fully completed, so everything piped up to now has
+      // been processed — safe to confirm. Crash recovery keys off this.
+      lastConfirmedTimestamp[chatJid] = lastAgentTimestamp[chatJid] || '';
+      saveState();
       queue.notifyIdle(chatJid);
     }
 
@@ -679,13 +704,21 @@ async function startMessageLoop(): Promise<void> {
  */
 function recoverPendingMessages(): void {
   for (const [chatJid, group] of Object.entries(registeredGroups)) {
-    const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
+    // Key off the CONFIRMED cursor, not the handoff cursor: a message piped
+    // into a container that then crashed advanced lastAgentTimestamp but was
+    // never processed, so only lastConfirmedTimestamp reflects real completion.
+    const sinceTimestamp =
+      lastConfirmedTimestamp[chatJid] || lastAgentTimestamp[chatJid] || '';
     const pending = getMessagesSince(chatJid, sinceTimestamp, ASSISTANT_NAME);
     if (pending.length > 0) {
       logger.info(
         { group: group.name, pendingCount: pending.length },
         'Recovery: found unprocessed messages',
       );
+      // Re-processing re-reads from the confirmed cursor, so reset the handoff
+      // cursor too — otherwise the loop's getMessagesSince would skip them.
+      lastAgentTimestamp[chatJid] = sinceTimestamp;
+      saveState();
       queue.enqueueMessageCheck(chatJid);
     }
   }
