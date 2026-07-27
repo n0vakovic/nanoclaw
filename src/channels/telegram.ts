@@ -34,6 +34,17 @@ export interface TelegramChannelOpts {
   registeredGroups: () => Record<string, RegisteredGroup>;
 }
 
+interface RetainedTelegramVoice {
+  buffer: Buffer | null;
+  filename: string | null;
+  hostAudioPath: string | null;
+  containerAudioPath: string | null;
+  hostMetadataPath: string;
+  containerMetadataPath: string;
+  metadata: Record<string, unknown>;
+  error?: unknown;
+}
+
 /**
  * Send a message with Telegram Markdown parse mode, falling back to plain text.
  * Claude's output naturally matches Telegram's Markdown v1 format:
@@ -142,27 +153,201 @@ export class TelegramChannel implements Channel {
   }
 
   /**
+   * Persist Telegram recovery metadata before attempting a download, then keep
+   * the downloaded voice file until transcription succeeds. A Telegram message
+   * ID alone cannot be used with getFile(); the file_id must survive failures.
+   */
+  private async retainTelegramVoice(opts: {
+    chatJid: string;
+    groupFolder: string;
+    messageId: string | number;
+    fileId: string;
+    fileUniqueId?: string;
+    duration?: number;
+    mimeType?: string;
+    source: 'message' | 'reply';
+  }): Promise<RetainedTelegramVoice> {
+    const safeMessageId = String(opts.messageId).replace(
+      /[^A-Za-z0-9_-]/g,
+      '_',
+    );
+    const basename = `voice_${safeMessageId}`;
+    const mediaDir = path.join(resolveGroupIpcPath(opts.groupFolder), 'media');
+    fs.mkdirSync(mediaDir, { recursive: true });
+
+    const metadataFilename = `${basename}.json`;
+    const hostMetadataPath = path.join(mediaDir, metadataFilename);
+    const containerMetadataPath = `/workspace/ipc/media/${metadataFilename}`;
+    const metadata: Record<string, unknown> = {
+      source: 'telegram',
+      recovery_source: opts.source,
+      status: 'download_pending',
+      chat_jid: opts.chatJid,
+      telegram_message_id: String(opts.messageId),
+      telegram_file_id: opts.fileId,
+      telegram_file_unique_id: opts.fileUniqueId || null,
+      duration_seconds: opts.duration ?? null,
+      mime_type: opts.mimeType || 'audio/ogg',
+      received_at: new Date().toISOString(),
+    };
+    const writeMetadata = () =>
+      fs.writeFileSync(
+        hostMetadataPath,
+        JSON.stringify(metadata, null, 2) + '\n',
+      );
+    writeMetadata();
+
+    try {
+      if (!this.bot) throw new Error('Telegram bot not initialized');
+      if (!opts.fileId) throw new Error('Telegram voice has no file_id');
+
+      const file = await this.bot.api.getFile(opts.fileId);
+      if (!file.file_path) {
+        throw new Error('Telegram getFile returned no file_path');
+      }
+      const url = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
+      const resp = await fetchWithTimeout(url, TELEGRAM_MEDIA_TIMEOUT_MS);
+      if (!resp.ok) {
+        throw new Error(`Telegram voice download returned HTTP ${resp.status}`);
+      }
+
+      const buffer = Buffer.from(await resp.arrayBuffer());
+      const ext = path.extname(file.file_path).toLowerCase() || '.ogg';
+      const filename = `${basename}${ext}`;
+      const hostAudioPath = path.join(mediaDir, filename);
+      const containerAudioPath = `/workspace/ipc/media/${filename}`;
+      fs.writeFileSync(hostAudioPath, buffer);
+
+      Object.assign(metadata, {
+        status: 'downloaded',
+        telegram_file_path: file.file_path,
+        filename,
+        audio_path: containerAudioPath,
+        bytes: buffer.length,
+        downloaded_at: new Date().toISOString(),
+      });
+      writeMetadata();
+
+      return {
+        buffer,
+        filename,
+        hostAudioPath,
+        containerAudioPath,
+        hostMetadataPath,
+        containerMetadataPath,
+        metadata,
+      };
+    } catch (error) {
+      Object.assign(metadata, {
+        status: 'download_failed',
+        failed_at: new Date().toISOString(),
+      });
+      writeMetadata();
+      return {
+        buffer: null,
+        filename: null,
+        hostAudioPath: null,
+        containerAudioPath: null,
+        hostMetadataPath,
+        containerMetadataPath,
+        metadata,
+        error,
+      };
+    }
+  }
+
+  private updateRetainedVoice(
+    retained: RetainedTelegramVoice,
+    patch: Record<string, unknown>,
+  ): void {
+    Object.assign(retained.metadata, patch);
+    fs.writeFileSync(
+      retained.hostMetadataPath,
+      JSON.stringify(retained.metadata, null, 2) + '\n',
+    );
+  }
+
+  private markRetainedVoiceTranscribed(
+    retained: RetainedTelegramVoice,
+    transcriptLength: number,
+  ): void {
+    if (retained.hostAudioPath) {
+      try {
+        fs.unlinkSync(retained.hostAudioPath);
+      } catch (err) {
+        logger.warn(
+          { err, audioPath: retained.hostAudioPath },
+          'Failed to remove transcribed Telegram voice file',
+        );
+      }
+    }
+    this.updateRetainedVoice(retained, {
+      status: 'transcribed',
+      audio_path: null,
+      transcript_chars: transcriptLength,
+      transcribed_at: new Date().toISOString(),
+    });
+  }
+
+  /**
    * Download and transcribe a quoted voice/audio message by its file_id.
    * Everything needed is already on Telegram, so replying to a voice note the
    * bot missed should recover its content — never ask the user to resend.
-   * Returns null if there's no audio to fetch or transcription fails.
+   * Retains the file and file_id metadata if transcription fails.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async transcribeQuotedAudio(replyTo: any): Promise<string | null> {
-    if (!this.bot) return null;
+  private async transcribeQuotedAudio(
+    replyTo: any,
+    chatJid: string,
+    groupFolder?: string,
+  ): Promise<{
+    transcript: string | null;
+    audioPath?: string;
+    metadataPath?: string;
+  }> {
     const media = replyTo?.voice || replyTo?.audio;
     const fileId = media?.file_id;
-    if (!fileId) return null;
-    try {
-      const file = await this.bot.api.getFile(fileId);
-      const url = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
-      const resp = await fetchWithTimeout(url, TELEGRAM_MEDIA_TIMEOUT_MS);
-      const buffer = Buffer.from(await resp.arrayBuffer());
-      return await transcribeAudio(buffer);
-    } catch (err) {
-      logger.error({ err }, 'Failed to transcribe quoted voice message');
-      return null;
+    if (!fileId || !groupFolder) return { transcript: null };
+
+    const retained = await this.retainTelegramVoice({
+      chatJid,
+      groupFolder,
+      messageId: replyTo.message_id || `reply_${Date.now()}`,
+      fileId,
+      fileUniqueId: media.file_unique_id,
+      duration: media.duration,
+      mimeType: media.mime_type,
+      source: 'reply',
+    });
+    if (!retained.buffer || !retained.filename) {
+      logger.error(
+        { err: retained.error, chatJid },
+        'Failed to download quoted Telegram voice message',
+      );
+      return {
+        transcript: null,
+        metadataPath: retained.containerMetadataPath,
+      };
     }
+
+    const transcript = await transcribeAudio(
+      retained.buffer,
+      retained.filename,
+    );
+    if (transcript) {
+      this.markRetainedVoiceTranscribed(retained, transcript.length);
+      return { transcript };
+    }
+
+    this.updateRetainedVoice(retained, {
+      status: 'transcription_failed',
+      failed_at: new Date().toISOString(),
+    });
+    return {
+      transcript: null,
+      audioPath: retained.containerAudioPath || undefined,
+      metadataPath: retained.containerMetadataPath,
+    };
   }
 
   /**
@@ -174,16 +359,33 @@ export class TelegramChannel implements Channel {
   private async enrichReplyContext(
     replyTo: any,
     body: string,
+    chatJid: string,
+    groupFolder?: string,
   ): Promise<string> {
     const quotesAudio = replyTo && (replyTo.voice || replyTo.audio);
     const hasOwnText =
       (typeof replyTo?.text === 'string' && replyTo.text.length > 0) ||
       (typeof replyTo?.caption === 'string' && replyTo.caption.length > 0);
     if (quotesAudio && !hasOwnText) {
-      const transcript = await this.transcribeQuotedAudio(replyTo);
-      if (transcript) {
+      const recovered = await this.transcribeQuotedAudio(
+        replyTo,
+        chatJid,
+        groupFolder,
+      );
+      if (recovered.transcript) {
         return wrapReplyContext(replyTo, body, {
-          quotedOverride: `[voice: ${transcript}]`,
+          quotedOverride: `[voice: ${recovered.transcript}]`,
+          maxLen: 4000,
+        });
+      }
+      const recoveryLocation = recovered.audioPath
+        ? `audio retained at ${recovered.audioPath}`
+        : recovered.metadataPath
+          ? `Telegram file metadata retained at ${recovered.metadataPath}`
+          : null;
+      if (recoveryLocation) {
+        return wrapReplyContext(replyTo, body, {
+          quotedOverride: `[voice message — transcription unavailable; ${recoveryLocation}]`,
           maxLen: 4000,
         });
       }
@@ -248,6 +450,7 @@ export class TelegramChannel implements Channel {
         ctx.chat.type === 'private'
           ? senderName
           : (ctx.chat as any).title || chatJid;
+      const group = this.opts.registeredGroups()[chatJid];
 
       // Translate Telegram @bot_username mentions into TRIGGER_PATTERN format.
       // Telegram @mentions (e.g., @andy_ai_bot) won't match TRIGGER_PATTERN
@@ -274,6 +477,8 @@ export class TelegramChannel implements Channel {
       content = await this.enrichReplyContext(
         (ctx.message as any).reply_to_message,
         content,
+        chatJid,
+        group?.folder,
       );
 
       // Store chat metadata for discovery
@@ -288,7 +493,6 @@ export class TelegramChannel implements Channel {
       );
 
       // Only deliver full message for registered groups
-      const group = this.opts.registeredGroups()[chatJid];
       if (!group) {
         logger.debug(
           { chatJid, chatName },
@@ -454,22 +658,60 @@ export class TelegramChannel implements Channel {
       void this.setReaction(chatJid, '👀');
 
       let content: string;
-      try {
-        const file = await ctx.getFile();
-        const url = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
-        const resp = await fetchWithTimeout(url, TELEGRAM_MEDIA_TIMEOUT_MS);
-        const buffer = Buffer.from(await resp.arrayBuffer());
-        const transcript = await transcribeAudio(buffer);
+      const voice = ctx.message.voice;
+      const retained = await this.retainTelegramVoice({
+        chatJid,
+        groupFolder: group.folder,
+        messageId: ctx.message.message_id,
+        fileId: voice?.file_id || '',
+        fileUniqueId: voice?.file_unique_id,
+        duration: voice?.duration,
+        mimeType: voice?.mime_type,
+        source: 'message',
+      });
+      if (retained.buffer && retained.filename) {
+        const transcript = await transcribeAudio(
+          retained.buffer,
+          retained.filename,
+        );
         content = formatTranscript(transcript, caption);
         if (transcript) {
+          this.markRetainedVoiceTranscribed(retained, transcript.length);
           logger.info(
-            { chatJid, chars: transcript.length },
+            {
+              chatJid,
+              messageId: ctx.message.message_id,
+              chars: transcript.length,
+            },
             'Transcribed Telegram voice message',
           );
+        } else {
+          this.updateRetainedVoice(retained, {
+            status: 'transcription_failed',
+            failed_at: new Date().toISOString(),
+          });
+          content += `\n\nAudio retained at ${retained.containerAudioPath}. Recovery metadata: ${retained.containerMetadataPath}.`;
+          logger.warn(
+            {
+              chatJid,
+              messageId: ctx.message.message_id,
+              audioPath: retained.containerAudioPath,
+            },
+            'Telegram voice transcription unavailable; retained audio',
+          );
         }
-      } catch (err) {
-        logger.error({ err }, 'Failed to download Telegram voice message');
+      } else {
+        logger.error(
+          {
+            err: retained.error,
+            chatJid,
+            messageId: ctx.message.message_id,
+            metadataPath: retained.containerMetadataPath,
+          },
+          'Failed to download Telegram voice message',
+        );
         content = formatTranscript(null, caption);
+        content += `\n\nTelegram file metadata retained at ${retained.containerMetadataPath} for retry.`;
       }
 
       content = wrapReplyContext(

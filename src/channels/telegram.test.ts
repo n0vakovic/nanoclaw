@@ -2,6 +2,13 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 
 // --- Mocks ---
 
+const fsMock = vi.hoisted(() => ({
+  mkdirSync: vi.fn(),
+  writeFileSync: vi.fn(),
+  unlinkSync: vi.fn(),
+}));
+vi.mock('fs', () => ({ default: fsMock }));
+
 // Mock registry (registerChannel runs at import time)
 vi.mock('./registry.js', () => ({ registerChannel: vi.fn() }));
 
@@ -11,11 +18,13 @@ vi.mock('../env.js', () => ({ readEnvFile: vi.fn(() => ({})) }));
 // Mock config
 vi.mock('../config.js', () => ({
   ASSISTANT_NAME: 'Andy',
+  DATA_DIR: '/tmp/nanoclaw-telegram-test-data',
+  GROUPS_DIR: '/tmp/nanoclaw-telegram-test-groups',
   TRIGGER_PATTERN: /^@Andy\b/i,
   TELEGRAM_API_TIMEOUT_MS: 30000,
-  TELEGRAM_HANDLER_TIMEOUT_MS: 60000,
+  TELEGRAM_HANDLER_TIMEOUT_MS: 90000,
   TELEGRAM_MEDIA_TIMEOUT_MS: 15000,
-  TRANSCRIPTION_TIMEOUT_MS: 20000,
+  TRANSCRIPTION_TIMEOUT_MS: 45000,
 }));
 
 // Mock logger
@@ -205,10 +214,22 @@ async function triggerMediaMessage(
 describe('TelegramChannel', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    transcribeAudioMock.mockResolvedValue(null);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        arrayBuffer: vi
+          .fn()
+          .mockResolvedValue(new Uint8Array([1, 2, 3]).buffer),
+      }),
+    );
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   // --- Connection lifecycle ---
@@ -491,6 +512,8 @@ describe('TelegramChannel', () => {
       vi.stubGlobal(
         'fetch',
         vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
           arrayBuffer: async () => new ArrayBuffer(8),
         }),
       );
@@ -519,6 +542,8 @@ describe('TelegramChannel', () => {
       vi.stubGlobal(
         'fetch',
         vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
           arrayBuffer: async () => new ArrayBuffer(8),
         }),
       );
@@ -532,7 +557,7 @@ describe('TelegramChannel', () => {
       await triggerTextMessage(ctx as any);
 
       const delivered = (opts.onMessage as any).mock.calls[0][1];
-      expect(delivered.content).toContain('[voice]');
+      expect(delivered.content).toContain('/workspace/ipc/media/voice_reply_');
       expect(delivered.content).toContain('this one');
 
       vi.unstubAllGlobals();
@@ -701,19 +726,71 @@ describe('TelegramChannel', () => {
       );
     });
 
-    it('stores voice message with placeholder', async () => {
+    it('retains voice audio and file metadata when transcription fails', async () => {
       const opts = createTestOpts();
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
 
-      const ctx = createMediaCtx({});
+      const ctx = createMediaCtx({
+        messageId: 77,
+        extra: {
+          voice: {
+            file_id: 'telegram-file-77',
+            file_unique_id: 'unique-77',
+            duration: 42,
+            mime_type: 'audio/ogg',
+          },
+        },
+      });
       await triggerMediaMessage('message:voice', ctx);
 
       expect(opts.onMessage).toHaveBeenCalledWith(
         'tg:100200300',
         expect.objectContaining({
-          content: '[Voice message — transcription unavailable]',
+          content: expect.stringContaining('/workspace/ipc/media/voice_77.ogg'),
         }),
+      );
+      expect(fsMock.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('voice_77.ogg'),
+        expect.any(Buffer),
+      );
+      expect(fsMock.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('voice_77.json'),
+        expect.stringContaining('"telegram_file_id": "telegram-file-77"'),
+      );
+    });
+
+    it('removes retained audio after successful transcription', async () => {
+      transcribeAudioMock.mockResolvedValueOnce('hello from the voice note');
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createMediaCtx({
+        messageId: 78,
+        extra: {
+          voice: {
+            file_id: 'telegram-file-78',
+            file_unique_id: 'unique-78',
+            duration: 3,
+            mime_type: 'audio/ogg',
+          },
+        },
+      });
+      await triggerMediaMessage('message:voice', ctx);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({
+          content: '[Voice: hello from the voice note]',
+        }),
+      );
+      expect(fsMock.unlinkSync).toHaveBeenCalledWith(
+        expect.stringContaining('voice_78.ogg'),
+      );
+      expect(fsMock.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('voice_78.json'),
+        expect.stringContaining('"status": "transcribed"'),
       );
     });
 

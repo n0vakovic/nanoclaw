@@ -15,6 +15,8 @@ const testPaths = vi.hoisted(() => {
   };
 });
 
+const transcribeAudioMock = vi.hoisted(() => vi.fn());
+
 vi.mock('./config.js', () => ({
   DATA_DIR: testPaths.dataDir,
   GROUPS_DIR: testPaths.groupsDir,
@@ -34,6 +36,10 @@ vi.mock('./sync-action.js', () => ({
   runSyncRepos: vi.fn(async () => 'ok'),
 }));
 
+vi.mock('./transcription.js', () => ({
+  transcribeAudio: transcribeAudioMock,
+}));
+
 import { dispatchAction } from './host-actions.js';
 import { writeIntergroupInboxItem } from './intergroup-inbox.js';
 import { RegisteredGroup } from './types.js';
@@ -45,10 +51,101 @@ const mainContext = {
 };
 
 beforeEach(() => {
+  transcribeAudioMock.mockReset();
   fs.rmSync(testPaths.base, { recursive: true, force: true });
   fs.mkdirSync(path.join(testPaths.groupsDir, 'global'), { recursive: true });
   fs.mkdirSync(path.join(testPaths.groupsDir, 'other-group'), {
     recursive: true,
+  });
+});
+
+describe('audio transcription host action', () => {
+  it('transcribes a retained group audio file and preserves it', async () => {
+    const groupIpcDir = path.join(testPaths.base, 'ipc', 'telegram_main');
+    const mediaDir = path.join(groupIpcDir, 'media');
+    const audioPath = path.join(mediaDir, 'voice_3447.oga');
+    const metadataPath = path.join(mediaDir, 'voice_3447.json');
+    fs.mkdirSync(mediaDir, { recursive: true });
+    fs.writeFileSync(audioPath, Buffer.from('audio bytes'));
+    fs.writeFileSync(
+      metadataPath,
+      JSON.stringify({ status: 'transcription_failed' }),
+    );
+    transcribeAudioMock.mockResolvedValue('Recovered voice transcript');
+
+    const result = await dispatchAction(
+      {
+        action: 'transcribeAudio',
+        requestId: 'transcribe-1',
+        params: { audioPath: '/workspace/ipc/media/voice_3447.oga' },
+      },
+      {
+        sourceGroup: 'telegram_main',
+        groupIpcDir,
+        isMain: true,
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(JSON.parse(result.output).transcript).toBe(
+      'Recovered voice transcript',
+    );
+    expect(transcribeAudioMock).toHaveBeenCalledWith(
+      Buffer.from('audio bytes'),
+      'voice_3447.oga',
+    );
+    expect(fs.existsSync(audioPath)).toBe(true);
+    expect(fs.readFileSync(metadataPath, 'utf-8')).toContain(
+      '"status": "transcribed_by_host_action"',
+    );
+  });
+
+  it('rejects paths outside the requesting group media directory', async () => {
+    const groupIpcDir = path.join(testPaths.base, 'ipc', 'telegram_main');
+    fs.mkdirSync(groupIpcDir, { recursive: true });
+
+    const result = await dispatchAction(
+      {
+        action: 'transcribeAudio',
+        requestId: 'transcribe-2',
+        params: { audioPath: '/workspace/ipc/../other/voice.oga' },
+      },
+      {
+        sourceGroup: 'telegram_main',
+        groupIpcDir,
+        isMain: true,
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.output).toContain('escapes group IPC dir');
+    expect(transcribeAudioMock).not.toHaveBeenCalled();
+  });
+
+  it('retains the audio when transcription is unavailable', async () => {
+    const groupIpcDir = path.join(testPaths.base, 'ipc', 'telegram_main');
+    const mediaDir = path.join(groupIpcDir, 'media');
+    const audioPath = path.join(mediaDir, 'voice_3447.oga');
+    fs.mkdirSync(mediaDir, { recursive: true });
+    fs.writeFileSync(audioPath, Buffer.from('audio bytes'));
+    transcribeAudioMock.mockResolvedValue(null);
+
+    const result = await dispatchAction(
+      {
+        action: 'transcribeAudio',
+        requestId: 'transcribe-3',
+        params: { audioPath: '/workspace/ipc/media/voice_3447.oga' },
+      },
+      {
+        sourceGroup: 'telegram_main',
+        groupIpcDir,
+        isMain: true,
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.output).toContain('retained audio was not deleted');
+    expect(fs.existsSync(audioPath)).toBe(true);
   });
 });
 

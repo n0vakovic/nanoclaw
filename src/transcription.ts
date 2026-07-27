@@ -51,7 +51,9 @@ export async function transcribeAudio(
     const openai = new OpenAI({
       apiKey,
       timeout: TRANSCRIPTION_TIMEOUT_MS,
-      maxRetries: 1,
+      // The Telegram handler has its own outer deadline. Retrying a full
+      // transcription here can exhaust that deadline and lose the update.
+      maxRetries: 0,
     });
     const file = new File([audioBuffer], filename, { type: 'audio/ogg' });
     const result = await openai.audio.transcriptions.create({

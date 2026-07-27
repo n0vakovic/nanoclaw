@@ -37,6 +37,7 @@ import {
   GitHubPermissionTier,
   RegisteredGroup,
 } from './types.js';
+import { transcribeAudio } from './transcription.js';
 
 export interface ActionRequest {
   action: string;
@@ -738,6 +739,61 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
       'TTS audio generated',
     );
     return JSON.stringify({ audioPath: returnedPath });
+  },
+
+  /**
+   * Transcribe a retained audio artifact without exposing OPENAI_API_KEY to
+   * the container. The requesting group can only access regular audio files
+   * inside its own IPC media directory.
+   */
+  transcribeAudio: async (params, ctx) => {
+    if (!ctx?.groupIpcDir) {
+      throw new Error('transcribeAudio: missing action context');
+    }
+    if (typeof params?.audioPath !== 'string') {
+      throw new Error('transcribeAudio: missing string params.audioPath');
+    }
+
+    const hostAudioPath = resolveTranscriptionAudioPath(
+      params.audioPath,
+      ctx.groupIpcDir,
+    );
+    const stat = fs.statSync(hostAudioPath);
+    const maxBytes = 25 * 1024 * 1024;
+    if (stat.size === 0) {
+      throw new Error('transcribeAudio: audio file is empty');
+    }
+    if (stat.size > maxBytes) {
+      throw new Error(
+        `transcribeAudio: audio file exceeds ${maxBytes} byte limit`,
+      );
+    }
+
+    const transcript = await transcribeAudio(
+      fs.readFileSync(hostAudioPath),
+      path.basename(hostAudioPath),
+    );
+    if (!transcript) {
+      throw new Error(
+        'transcribeAudio: transcription unavailable; retained audio was not deleted',
+      );
+    }
+
+    updateTranscriptionMetadata(hostAudioPath, transcript.length);
+    logger.info(
+      {
+        sourceGroup: ctx.sourceGroup,
+        audioPath: params.audioPath,
+        bytes: stat.size,
+        transcriptChars: transcript.length,
+      },
+      'Retained audio transcribed via host action',
+    );
+    return JSON.stringify({
+      audioPath: params.audioPath,
+      transcript,
+      chars: transcript.length,
+    });
   },
 
   /**
@@ -1486,6 +1542,80 @@ function resolveContainerIpcPath(
     throw new Error(`${kind}: path escapes group IPC dir: ${containerPath}`);
   }
   return candidate;
+}
+
+const TRANSCRIPTION_AUDIO_EXTENSIONS = new Set([
+  '.flac',
+  '.m4a',
+  '.mp3',
+  '.mp4',
+  '.mpeg',
+  '.mpga',
+  '.oga',
+  '.ogg',
+  '.wav',
+  '.webm',
+]);
+
+function resolveTranscriptionAudioPath(
+  containerPath: string,
+  groupIpcDir: string,
+): string {
+  const mediaDir = path.resolve(groupIpcDir, 'media');
+  const candidate = resolveContainerIpcPath(
+    containerPath,
+    groupIpcDir,
+    'transcribeAudio',
+  );
+  ensureWithinBase(mediaDir, candidate);
+
+  const extension = path.extname(candidate).toLowerCase();
+  if (!TRANSCRIPTION_AUDIO_EXTENSIONS.has(extension)) {
+    throw new Error(
+      `transcribeAudio: unsupported audio extension "${extension || '(none)'}"`,
+    );
+  }
+
+  const linkStat = fs.lstatSync(candidate);
+  if (!linkStat.isFile() || linkStat.isSymbolicLink()) {
+    throw new Error('transcribeAudio: path must be a regular audio file');
+  }
+  const realMediaDir = fs.realpathSync(mediaDir);
+  const realPath = fs.realpathSync(candidate);
+  ensureWithinBase(realMediaDir, realPath);
+  return realPath;
+}
+
+function updateTranscriptionMetadata(
+  hostAudioPath: string,
+  transcriptChars: number,
+): void {
+  const metadataPath = hostAudioPath.replace(/\.[^.]+$/, '.json');
+  if (!fs.existsSync(metadataPath)) return;
+
+  try {
+    const metadata = JSON.parse(
+      fs.readFileSync(metadataPath, 'utf-8'),
+    ) as Record<string, unknown>;
+    writeFileAtomic(
+      metadataPath,
+      JSON.stringify(
+        {
+          ...metadata,
+          status: 'transcribed_by_host_action',
+          transcript_chars: transcriptChars,
+          transcribed_at: new Date().toISOString(),
+        },
+        null,
+        2,
+      ),
+    );
+  } catch (err) {
+    logger.warn(
+      { err, metadataPath },
+      'Failed to update retained audio transcription metadata',
+    );
+  }
 }
 
 export async function dispatchAction(

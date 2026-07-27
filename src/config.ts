@@ -33,15 +33,15 @@ export const TELEGRAM_MEDIA_TIMEOUT_MS = parseInt(
   10,
 ); // per media download (getFile + file fetch)
 export const TRANSCRIPTION_TIMEOUT_MS = parseInt(
-  process.env.TRANSCRIPTION_TIMEOUT_MS || '20000',
+  process.env.TRANSCRIPTION_TIMEOUT_MS || '45000',
   10,
-); // Whisper call
+); // Whisper call; word timestamps add latency
 export const TELEGRAM_API_TIMEOUT_MS = parseInt(
   process.env.TELEGRAM_API_TIMEOUT_MS || '30000',
   10,
 ); // every outbound bot.api.* call
 export const TELEGRAM_HANDLER_TIMEOUT_MS = parseInt(
-  process.env.TELEGRAM_HANDLER_TIMEOUT_MS || '60000',
+  process.env.TELEGRAM_HANDLER_TIMEOUT_MS || '90000',
   10,
 ); // inbound handler backstop; must exceed media + transcription budgets
 

@@ -207,6 +207,49 @@ server.tool(
   },
 );
 
+server.tool(
+  'transcribe_audio',
+  'Transcribe a retained voice/audio attachment through a host-side action. Use whenever an incoming message says audio was retained at /workspace/ipc/media/... because automatic transcription failed. The host keeps the OpenAI credential private. Do not ask the user to resend until this tool has also failed.',
+  {
+    audioPath: z
+      .string()
+      .describe(
+        'Exact retained path under /workspace/ipc/media/ supplied with the incoming message, for example "/workspace/ipc/media/voice_3447.oga"',
+      ),
+  },
+  async (args) => {
+    try {
+      const output = await requestHostAction(
+        'transcribeAudio',
+        { audioPath: args.audioPath },
+        60_000,
+      );
+      const result = JSON.parse(output) as {
+        transcript?: string;
+        audioPath?: string;
+      };
+      if (!result.transcript) {
+        throw new Error('Host returned no transcript');
+      }
+      return {
+        content: [{ type: 'text' as const, text: result.transcript }],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `Audio transcription failed; the retained file was not deleted: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
 /**
  * Send a pre-existing audio file as a Telegram audio (music-track UX with
  * optional title/performer metadata). For longer audio like podcasts or
