@@ -35,6 +35,7 @@ function renderWithPauses(words: WhisperWord[]): string {
 export async function transcribeAudio(
   audioBuffer: Buffer,
   filename = 'voice.ogg',
+  timeoutMs = TRANSCRIPTION_TIMEOUT_MS,
 ): Promise<string | null> {
   const apiKey =
     process.env.OPENAI_API_KEY ||
@@ -50,9 +51,10 @@ export async function transcribeAudio(
     // call degrades to fallback text quickly. See docs/concurrency-model.md.
     const openai = new OpenAI({
       apiKey,
-      timeout: TRANSCRIPTION_TIMEOUT_MS,
-      // The Telegram handler has its own outer deadline. Retrying a full
-      // transcription here can exhaust that deadline and lose the update.
+      timeout: timeoutMs,
+      // Retry orchestration belongs to the caller. The Telegram handler has
+      // its own outer deadline; retained-audio recovery supplies a longer
+      // single-attempt timeout explicitly.
       maxRetries: 0,
     });
     const file = new File([audioBuffer], filename, { type: 'audio/ogg' });

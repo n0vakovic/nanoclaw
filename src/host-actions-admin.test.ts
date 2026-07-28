@@ -21,6 +21,7 @@ vi.mock('./config.js', () => ({
   DATA_DIR: testPaths.dataDir,
   GROUPS_DIR: testPaths.groupsDir,
   GITHUB_ALLOWLIST_PATH: testPaths.githubAllowlistPath,
+  RETAINED_TRANSCRIPTION_TIMEOUT_MS: 240000,
 }));
 
 vi.mock('./logger.js', () => ({
@@ -93,6 +94,7 @@ describe('audio transcription host action', () => {
     expect(transcribeAudioMock).toHaveBeenCalledWith(
       Buffer.from('audio bytes'),
       'voice_3447.oga',
+      240000,
     );
     expect(fs.existsSync(audioPath)).toBe(true);
     expect(fs.readFileSync(metadataPath, 'utf-8')).toContain(

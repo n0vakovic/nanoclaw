@@ -36,6 +36,10 @@ export const TRANSCRIPTION_TIMEOUT_MS = parseInt(
   process.env.TRANSCRIPTION_TIMEOUT_MS || '45000',
   10,
 ); // Whisper call; word timestamps add latency
+export const RETAINED_TRANSCRIPTION_TIMEOUT_MS = parseInt(
+  process.env.RETAINED_TRANSCRIPTION_TIMEOUT_MS || '240000',
+  10,
+); // Explicit host-side retry; runs outside the Telegram update handler
 export const TELEGRAM_API_TIMEOUT_MS = parseInt(
   process.env.TELEGRAM_API_TIMEOUT_MS || '30000',
   10,

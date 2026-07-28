@@ -19,6 +19,7 @@ import {
   GITHUB_ALLOWLIST_PATH,
   GROUPS_DIR,
   HOST_ACTION_FETCH_TIMEOUT_MS,
+  RETAINED_TRANSCRIPTION_TIMEOUT_MS,
 } from './config.js';
 import { readEnvFile } from './env.js';
 import { fetchWithTimeout } from './timeout.js';
@@ -772,6 +773,7 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
     const transcript = await transcribeAudio(
       fs.readFileSync(hostAudioPath),
       path.basename(hostAudioPath),
+      RETAINED_TRANSCRIPTION_TIMEOUT_MS,
     );
     if (!transcript) {
       throw new Error(
