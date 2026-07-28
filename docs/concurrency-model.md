@@ -64,6 +64,11 @@ headers. The same structured diagnostic is stored in the retained voice
 metadata JSON, so evidence survives log rotation and remains coupled to the
 exact audio by SHA-256.
 
+Telegram's `.oga` filename suffix is normalized to `.ogg` only for the OpenAI
+multipart upload. The retained filename and bytes are unchanged. OpenAI rejects
+the `.oga` alias during request validation even when the payload is valid Ogg
+audio.
+
 The two backstops (inbound middleware + outbound transformer) are the structural
 guarantee: even a brand-new handler or a future `bot.api` call that forgets its
 own timeout still cannot wedge either loop. The per-call timeouts are the

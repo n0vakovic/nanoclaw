@@ -36,6 +36,7 @@ type AttemptDiagnostic = {
   attemptId: string;
   mode: TranscriptionMode;
   model: string;
+  uploadFilename: string;
   timeoutMs: number;
   elapsedMs: number;
   requestId?: string | null;
@@ -198,15 +199,19 @@ async function runAttempt(
   const trace: TransportTrace = { attemptId, startedAtMs };
   const model =
     mode === 'whisper_word_timestamps' ? 'whisper-1' : 'gpt-4o-mini-transcribe';
+  // Telegram commonly names Ogg voice notes `.oga`. OpenAI validates the
+  // multipart filename extension and rejects that alias even though the bytes
+  // and MIME type are valid Ogg audio.
+  const uploadFilename = filename.replace(/\.oga$/i, '.ogg');
 
   logger.info(
-    { ...commonLog, attemptId, mode, model, timeoutMs },
+    { ...commonLog, attemptId, mode, model, uploadFilename, timeoutMs },
     'OpenAI transcription attempt started',
   );
 
   try {
     const openai = new OpenAI({ apiKey, timeout: timeoutMs, maxRetries: 0 });
-    const file = new File([audioBuffer], filename, { type: 'audio/ogg' });
+    const file = new File([audioBuffer], uploadFilename, { type: 'audio/ogg' });
     const response = await transportContext.run(trace, () => {
       const apiPromise =
         mode === 'whisper_word_timestamps'
@@ -241,6 +246,7 @@ async function runAttempt(
       attemptId,
       mode,
       model,
+      uploadFilename,
       timeoutMs,
       elapsedMs: Date.now() - startedAtMs,
       requestId: response.request_id,
@@ -261,6 +267,7 @@ async function runAttempt(
       attemptId,
       mode,
       model,
+      uploadFilename,
       timeoutMs,
       elapsedMs: Date.now() - startedAtMs,
       transport: publicTransportTrace(trace),

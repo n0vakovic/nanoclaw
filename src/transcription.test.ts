@@ -111,12 +111,15 @@ describe('transcription diagnostics and fallback', () => {
     expect(outcome.diagnostic.attempts[0]).toMatchObject({
       mode: 'whisper_word_timestamps',
       model: 'whisper-1',
+      uploadFilename: 'voice.ogg',
       requestId: 'req_word',
       transport: {
         responseStatus: 200,
       },
     });
     expect(outcome.diagnostic.attempts[0].transport.bodySentMs).toBeDefined();
+    const uploadedFile = createMock.mock.calls[0][0].file as File;
+    expect(uploadedFile.name).toBe('voice.ogg');
   });
 
   it('uses a different model and plain JSON after word timestamps time out', async () => {
