@@ -37,11 +37,26 @@ vi.mock('../logger.js', () => ({
   },
 }));
 
-// Mock transcription: transcribeAudio is controllable per-test; formatTranscript
-// mirrors the real pure formatter so existing voice tests keep their behavior.
+// Mock transcription: the transcript is controllable per-test; the detailed
+// result mirrors the production shape so diagnostics persistence is exercised.
 const transcribeAudioMock = vi.hoisted(() => vi.fn());
 vi.mock('../transcription.js', () => ({
-  transcribeAudio: transcribeAudioMock,
+  transcribeAudioDetailed: async (...args: unknown[]) => {
+    const transcript = await transcribeAudioMock(...args);
+    return {
+      transcript,
+      diagnostic: {
+        audioSha256: 'test-sha256',
+        audioBytes: 8,
+        filename: 'voice.ogg',
+        context: 'telegram_test',
+        classification: transcript
+          ? 'plain_transcription_succeeded'
+          : 'transcription_backend_no_response_after_upload',
+        attempts: [],
+      },
+    };
+  },
   formatTranscript: (transcript: string | null, caption?: string) => {
     const suffix = caption ? ` ${caption}` : '';
     if (!transcript)
@@ -756,7 +771,9 @@ describe('TelegramChannel', () => {
       );
       expect(fsMock.writeFileSync).toHaveBeenCalledWith(
         expect.stringContaining('voice_77.json'),
-        expect.stringContaining('"telegram_file_id": "telegram-file-77"'),
+        expect.stringContaining(
+          '"classification": "transcription_backend_no_response_after_upload"',
+        ),
       );
     });
 

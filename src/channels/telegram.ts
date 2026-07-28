@@ -14,7 +14,11 @@ import {
 import { readEnvFile } from '../env.js';
 import { resolveGroupIpcPath } from '../group-folder.js';
 import { logger } from '../logger.js';
-import { transcribeAudio, formatTranscript } from '../transcription.js';
+import {
+  transcribeAudioDetailed,
+  formatTranscript,
+  type TranscriptionDiagnostic,
+} from '../transcription.js';
 import { fetchWithTimeout } from '../timeout.js';
 import {
   createHandlerTimeoutMiddleware,
@@ -270,6 +274,7 @@ export class TelegramChannel implements Channel {
   private markRetainedVoiceTranscribed(
     retained: RetainedTelegramVoice,
     transcriptLength: number,
+    diagnostic: TranscriptionDiagnostic,
   ): void {
     if (retained.hostAudioPath) {
       try {
@@ -285,6 +290,7 @@ export class TelegramChannel implements Channel {
       status: 'transcribed',
       audio_path: null,
       transcript_chars: transcriptLength,
+      transcription_diagnostic: diagnostic,
       transcribed_at: new Date().toISOString(),
     });
   }
@@ -330,17 +336,27 @@ export class TelegramChannel implements Channel {
       };
     }
 
-    const transcript = await transcribeAudio(
+    const outcome = await transcribeAudioDetailed(
       retained.buffer,
       retained.filename,
+      {
+        context: 'telegram_quoted_reply',
+        audioDurationSeconds: media.duration,
+      },
     );
+    const { transcript } = outcome;
     if (transcript) {
-      this.markRetainedVoiceTranscribed(retained, transcript.length);
+      this.markRetainedVoiceTranscribed(
+        retained,
+        transcript.length,
+        outcome.diagnostic,
+      );
       return { transcript };
     }
 
     this.updateRetainedVoice(retained, {
       status: 'transcription_failed',
+      transcription_diagnostic: outcome.diagnostic,
       failed_at: new Date().toISOString(),
     });
     return {
@@ -670,13 +686,22 @@ export class TelegramChannel implements Channel {
         source: 'message',
       });
       if (retained.buffer && retained.filename) {
-        const transcript = await transcribeAudio(
+        const outcome = await transcribeAudioDetailed(
           retained.buffer,
           retained.filename,
+          {
+            context: 'telegram_message',
+            audioDurationSeconds: voice?.duration,
+          },
         );
+        const { transcript } = outcome;
         content = formatTranscript(transcript, caption);
         if (transcript) {
-          this.markRetainedVoiceTranscribed(retained, transcript.length);
+          this.markRetainedVoiceTranscribed(
+            retained,
+            transcript.length,
+            outcome.diagnostic,
+          );
           logger.info(
             {
               chatJid,
@@ -688,6 +713,7 @@ export class TelegramChannel implements Channel {
         } else {
           this.updateRetainedVoice(retained, {
             status: 'transcription_failed',
+            transcription_diagnostic: outcome.diagnostic,
             failed_at: new Date().toISOString(),
           });
           content += `\n\nAudio retained at ${retained.containerAudioPath}. Recovery metadata: ${retained.containerMetadataPath}.`;

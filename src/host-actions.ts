@@ -38,7 +38,7 @@ import {
   GitHubPermissionTier,
   RegisteredGroup,
 } from './types.js';
-import { transcribeAudio } from './transcription.js';
+import { transcribeAudioDetailed } from './transcription.js';
 
 export interface ActionRequest {
   action: string;
@@ -770,14 +770,21 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
       );
     }
 
-    const transcript = await transcribeAudio(
+    const outcome = await transcribeAudioDetailed(
       fs.readFileSync(hostAudioPath),
       path.basename(hostAudioPath),
-      RETAINED_TRANSCRIPTION_TIMEOUT_MS,
+      {
+        timeoutMs: RETAINED_TRANSCRIPTION_TIMEOUT_MS,
+        enablePlainFallback: false,
+        primaryMode: 'gpt4o_plain_json',
+        context: 'retained_host_action',
+        audioDurationSeconds: readRetainedAudioDuration(hostAudioPath),
+      },
     );
+    const transcript = outcome.transcript;
     if (!transcript) {
       throw new Error(
-        'transcribeAudio: transcription unavailable; retained audio was not deleted',
+        `transcribeAudio: ${outcome.diagnostic.classification}; retained audio was not deleted; diagnostic=${JSON.stringify(outcome.diagnostic)}`,
       );
     }
 
@@ -1617,6 +1624,26 @@ function updateTranscriptionMetadata(
       { err, metadataPath },
       'Failed to update retained audio transcription metadata',
     );
+  }
+}
+
+function readRetainedAudioDuration(hostAudioPath: string): number | undefined {
+  const metadataPath = hostAudioPath.replace(/\.[^.]+$/, '.json');
+  if (!fs.existsSync(metadataPath)) return undefined;
+
+  try {
+    const metadata = JSON.parse(
+      fs.readFileSync(metadataPath, 'utf-8'),
+    ) as Record<string, unknown>;
+    return typeof metadata.duration_seconds === 'number'
+      ? metadata.duration_seconds
+      : undefined;
+  } catch (err) {
+    logger.warn(
+      { err, metadataPath },
+      'Failed to read retained audio duration metadata',
+    );
+    return undefined;
   }
 }
 

@@ -15,13 +15,13 @@ const testPaths = vi.hoisted(() => {
   };
 });
 
-const transcribeAudioMock = vi.hoisted(() => vi.fn());
+const transcribeAudioDetailedMock = vi.hoisted(() => vi.fn());
 
 vi.mock('./config.js', () => ({
   DATA_DIR: testPaths.dataDir,
   GROUPS_DIR: testPaths.groupsDir,
   GITHUB_ALLOWLIST_PATH: testPaths.githubAllowlistPath,
-  RETAINED_TRANSCRIPTION_TIMEOUT_MS: 240000,
+  RETAINED_TRANSCRIPTION_TIMEOUT_MS: 45000,
 }));
 
 vi.mock('./logger.js', () => ({
@@ -38,7 +38,7 @@ vi.mock('./sync-action.js', () => ({
 }));
 
 vi.mock('./transcription.js', () => ({
-  transcribeAudio: transcribeAudioMock,
+  transcribeAudioDetailed: transcribeAudioDetailedMock,
 }));
 
 import { dispatchAction } from './host-actions.js';
@@ -52,7 +52,7 @@ const mainContext = {
 };
 
 beforeEach(() => {
-  transcribeAudioMock.mockReset();
+  transcribeAudioDetailedMock.mockReset();
   fs.rmSync(testPaths.base, { recursive: true, force: true });
   fs.mkdirSync(path.join(testPaths.groupsDir, 'global'), { recursive: true });
   fs.mkdirSync(path.join(testPaths.groupsDir, 'other-group'), {
@@ -72,7 +72,10 @@ describe('audio transcription host action', () => {
       metadataPath,
       JSON.stringify({ status: 'transcription_failed' }),
     );
-    transcribeAudioMock.mockResolvedValue('Recovered voice transcript');
+    transcribeAudioDetailedMock.mockResolvedValue({
+      transcript: 'Recovered voice transcript',
+      diagnostic: { classification: 'plain_transcription_succeeded' },
+    });
 
     const result = await dispatchAction(
       {
@@ -91,10 +94,16 @@ describe('audio transcription host action', () => {
     expect(JSON.parse(result.output).transcript).toBe(
       'Recovered voice transcript',
     );
-    expect(transcribeAudioMock).toHaveBeenCalledWith(
+    expect(transcribeAudioDetailedMock).toHaveBeenCalledWith(
       Buffer.from('audio bytes'),
       'voice_3447.oga',
-      240000,
+      {
+        timeoutMs: 45000,
+        enablePlainFallback: false,
+        primaryMode: 'gpt4o_plain_json',
+        context: 'retained_host_action',
+        audioDurationSeconds: undefined,
+      },
     );
     expect(fs.existsSync(audioPath)).toBe(true);
     expect(fs.readFileSync(metadataPath, 'utf-8')).toContain(
@@ -121,7 +130,7 @@ describe('audio transcription host action', () => {
 
     expect(result.ok).toBe(false);
     expect(result.output).toContain('escapes group IPC dir');
-    expect(transcribeAudioMock).not.toHaveBeenCalled();
+    expect(transcribeAudioDetailedMock).not.toHaveBeenCalled();
   });
 
   it('retains the audio when transcription is unavailable', async () => {
@@ -130,7 +139,13 @@ describe('audio transcription host action', () => {
     const audioPath = path.join(mediaDir, 'voice_3447.oga');
     fs.mkdirSync(mediaDir, { recursive: true });
     fs.writeFileSync(audioPath, Buffer.from('audio bytes'));
-    transcribeAudioMock.mockResolvedValue(null);
+    transcribeAudioDetailedMock.mockResolvedValue({
+      transcript: null,
+      diagnostic: {
+        classification: 'transcription_backend_no_response_after_upload',
+        attempts: [],
+      },
+    });
 
     const result = await dispatchAction(
       {
@@ -146,6 +161,9 @@ describe('audio transcription host action', () => {
     );
 
     expect(result.ok).toBe(false);
+    expect(result.output).toContain(
+      'transcription_backend_no_response_after_upload',
+    );
     expect(result.output).toContain('retained audio was not deleted');
     expect(fs.existsSync(audioPath)).toBe(true);
   });

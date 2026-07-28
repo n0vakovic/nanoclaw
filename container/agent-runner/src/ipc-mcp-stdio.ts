@@ -222,7 +222,7 @@ server.tool(
       const output = await requestHostAction(
         'transcribeAudio',
         { audioPath: args.audioPath },
-        270_000,
+        60_000,
       );
       const result = JSON.parse(output) as {
         transcript?: string;

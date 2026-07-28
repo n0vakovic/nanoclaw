@@ -44,14 +44,25 @@ is still stored, rather than the whole handler being abandoned.
 | Guard                                                       | Where                                                                | Budget                                                                   | Protects                                                                                                                              |
 | ----------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
 | Per-fetch timeout (`fetchWithTimeout`)                      | media downloads in `telegram.ts`; every `fetch` in `host-actions.ts` | `TELEGRAM_MEDIA_TIMEOUT_MS` = 15s / `HOST_ACTION_FETCH_TIMEOUT_MS` = 30s | graceful degradation — a stalled download rejects into its catch and the message stores with fallback text                            |
-| Automatic Whisper timeout                                   | `transcription.ts` (`new OpenAI({ timeout, maxRetries })`)           | `TRANSCRIPTION_TIMEOUT_MS` = 45s                                         | a slow/stalled transcription can't pin the voice handler for minutes                                                                  |
-| Retained-audio Whisper retry                                | `host-actions.ts` (`transcribeAudio`)                                | `RETAINED_TRANSCRIPTION_TIMEOUT_MS` = 240s                               | an explicit retry can finish long voice notes without extending the Telegram update-handler budget                                   |
+| Automatic word-timestamp attempt                            | `transcription.ts` (`whisper-1`, verbose JSON)                       | `TRANSCRIPTION_TIMEOUT_MS` = 30s                                         | preserves pause markers when the word-timestamp path is healthy                                                                       |
+| Automatic plain-text fallback                               | `transcription.ts` (`gpt-4o-mini-transcribe`, JSON)                  | `TRANSCRIPTION_FALLBACK_TIMEOUT_MS` = 30s                                | uses a different model/request shape when word timestamps stall; both attempts fit inside the handler budget                          |
+| Retained-audio retry                                        | `host-actions.ts` (`gpt-4o-mini-transcribe`, JSON)                   | `RETAINED_TRANSCRIPTION_TIMEOUT_MS` = 45s                                | a final host-side retry remains interactive instead of blocking silently for several minutes                                          |
 | Inbound handler backstop (`createHandlerTimeoutMiddleware`) | first `bot.use()` in `telegram.ts`                                   | `TELEGRAM_HANDLER_TIMEOUT_MS` = 90s                                      | grammy's poll loop — no single update can block it longer than the budget; on timeout the handler is abandoned and the loop continues |
 | Outbound API backstop (`createApiTimeoutTransformer`)       | `bot.api.config.use()` in `telegram.ts`                              | `TELEGRAM_API_TIMEOUT_MS` = 30s                                          | every `bot.api.*` send — a stalled send can't freeze the IPC watcher or the container output chain                                    |
 
 The primitives (`withTimeout`, `fetchWithTimeout`) live in `src/timeout.ts`; the
 grammy guards in `src/bot-guards.ts`. Both are unit-tested in isolation, and
 `telegram.test.ts` asserts they are installed on `connect()`.
+
+Every transcription attempt logs an audio SHA-256, byte count, reported audio
+duration, model/request mode, timeout, elapsed time, OpenAI request ID when one
+exists, and undici transport phases (`request:create`, `bodySent`, response
+headers, transport error). If both automatic attempts fail, a credential-free
+OpenAI edge probe distinguishes general DNS/TCP/TLS reachability from a
+transcription request that uploaded successfully but never received response
+headers. The same structured diagnostic is stored in the retained voice
+metadata JSON, so evidence survives log rotation and remains coupled to the
+exact audio by SHA-256.
 
 The two backstops (inbound middleware + outbound transformer) are the structural
 guarantee: even a brand-new handler or a future `bot.api` call that forgets its

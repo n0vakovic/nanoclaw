@@ -33,13 +33,17 @@ export const TELEGRAM_MEDIA_TIMEOUT_MS = parseInt(
   10,
 ); // per media download (getFile + file fetch)
 export const TRANSCRIPTION_TIMEOUT_MS = parseInt(
-  process.env.TRANSCRIPTION_TIMEOUT_MS || '45000',
+  process.env.TRANSCRIPTION_TIMEOUT_MS || '30000',
   10,
 ); // Whisper call; word timestamps add latency
-export const RETAINED_TRANSCRIPTION_TIMEOUT_MS = parseInt(
-  process.env.RETAINED_TRANSCRIPTION_TIMEOUT_MS || '240000',
+export const TRANSCRIPTION_FALLBACK_TIMEOUT_MS = parseInt(
+  process.env.TRANSCRIPTION_FALLBACK_TIMEOUT_MS || '30000',
   10,
-); // Explicit host-side retry; runs outside the Telegram update handler
+); // Plain JSON fallback on a different transcription model
+export const RETAINED_TRANSCRIPTION_TIMEOUT_MS = parseInt(
+  process.env.RETAINED_TRANSCRIPTION_TIMEOUT_MS || '45000',
+  10,
+); // Explicit host-side retry; still bounded for interactive use
 export const TELEGRAM_API_TIMEOUT_MS = parseInt(
   process.env.TELEGRAM_API_TIMEOUT_MS || '30000',
   10,
