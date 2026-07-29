@@ -1,0 +1,71 @@
+# Host-brokered Google Workspace
+
+NanoClaw exposes narrow Google Calendar actions and read-only Docs access
+through the host. The `gog` binary and its credentials stay outside agent
+containers. There is no generic command or argument passthrough.
+
+## Configure
+
+Copy `docs/google-policy.example.json` to:
+
+```text
+~/.config/nanoclaw/google-policy.json
+```
+
+Replace all placeholders. Account and resource aliases are the only names
+agents may use; raw account emails, calendar IDs, and Drive folder IDs remain
+host-side.
+
+Calendar write modes are:
+
+- `deny`: unavailable
+- `manual`: create an immutable, expiring proposal in SQLite and send it to
+  the configured private Telegram chat
+- `auto`: reserved for a future constrained preapproval release; currently
+  fails closed
+
+The initial policy uses `manual` for every Calendar write. Missing policy,
+aliases, or permissions fail closed.
+
+## Approval flow
+
+The owner approves with `/approve G-XXXXXXXXXX` or rejects with
+`/reject G-XXXXXXXXXX`. Only the configured private Telegram chat and exact
+Telegram user ID are accepted. Natural-language confirmation is ignored.
+
+Approval freezes and hashes the exact payload and resolved account/calendar
+target. Calendar updates also freeze an event snapshot. A changed event or
+policy target must be proposed again. Execution runs in the background so
+Telegram's update loop does not block, and the final result is routed to the
+requesting chat.
+
+Pending approvals expire after ten minutes by default. Approved work resumes
+after a restart. Work that was already executing is not replayed automatically
+because the external write may have succeeded before the process stopped.
+
+## Hard invariants
+
+- Calendar attendees and invitation changes are not accepted.
+- Calendar notifications are always `none`.
+- Deletes, sharing changes, moves, Gmail sends, and arbitrary `gog` commands
+  have no exposed action.
+- Reads force `--readonly`, `--no-input`, bounded output, and untrusted-content
+  wrapping.
+- Writes execute only the payload stored in SQLite, never command arguments
+  supplied during approval.
+- Ambiguous mutation timeouts become `needs_reconciliation`; they are never
+  reported as definitive failures or automatically replayed.
+
+## Agent tools
+
+- `google_calendar_events`
+- `google_calendar_propose_create`
+- `google_calendar_propose_update`
+- `google_docs_read`
+
+Proposal receipts mean a write is pending; they are never proof that the
+external mutation succeeded.
+
+Docs create/append/replace and Drive uploads remain tracked in GitHub issues
+#189 and #190. They are intentionally not exposed until document concurrency,
+folder scoping, and host-owned file staging are implemented.

@@ -39,6 +39,12 @@ import {
   RegisteredGroup,
 } from './types.js';
 import { transcribeAudioDetailed } from './transcription.js';
+import {
+  googleCalendarList,
+  googleDocsRead,
+  proposeGoogleWrite,
+  type GoogleActionContext,
+} from './google-workspace.js';
 
 export interface ActionRequest {
   action: string;
@@ -61,8 +67,10 @@ export interface ActionResult {
  */
 export interface ActionContext {
   sourceGroup: string;
+  sourceChatJid?: string;
   groupIpcDir: string;
   isMain?: boolean;
+  sendMessage?: (jid: string, text: string) => Promise<void>;
   registeredGroups?: () => Record<string, RegisteredGroup>;
   updateRegisteredGroup?: (jid: string, group: RegisteredGroup) => void;
 }
@@ -71,6 +79,18 @@ type ActionHandler = (
   params?: Record<string, unknown>,
   ctx?: ActionContext,
 ) => Promise<string>;
+
+function googleContext(ctx?: ActionContext): GoogleActionContext {
+  if (!ctx?.sourceChatJid || !ctx.sendMessage) {
+    throw new Error('Google host action is missing routing context');
+  }
+  return {
+    sourceGroup: ctx.sourceGroup,
+    sourceChatJid: ctx.sourceChatJid,
+    groupIpcDir: ctx.groupIpcDir,
+    sendMessage: ctx.sendMessage,
+  };
+}
 
 /* ------------------------------------------------------------------ */
 /*  GitHub Issue helper utilities                                     */
@@ -410,6 +430,18 @@ function summarizeSessionLine(line: string, lineNumber: number): unknown {
 /* ------------------------------------------------------------------ */
 
 const ACTION_REGISTRY: Record<string, ActionHandler> = {
+  googleCalendarList: async (params, ctx) =>
+    googleCalendarList(params || {}, googleContext(ctx).sourceGroup),
+
+  googleDocsRead: async (params, ctx) =>
+    googleDocsRead(params || {}, googleContext(ctx).sourceGroup),
+
+  googleCalendarProposeCreate: async (params, ctx) =>
+    proposeGoogleWrite('calendar.create', params || {}, googleContext(ctx)),
+
+  googleCalendarProposeUpdate: async (params, ctx) =>
+    proposeGoogleWrite('calendar.update', params || {}, googleContext(ctx)),
+
   readGlobalMemory: async (params, ctx) => {
     assertMain(ctx);
     const globalDir = path.join(GROUPS_DIR, 'global');

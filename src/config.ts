@@ -86,6 +86,9 @@ export const GITHUB_ALLOWLIST_PATH = path.join(
   'nanoclaw',
   'github-allowlist.json',
 );
+export const GOOGLE_POLICY_PATH =
+  process.env.GOOGLE_POLICY_PATH ||
+  path.join(HOME_DIR, '.config', 'nanoclaw', 'google-policy.json');
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');

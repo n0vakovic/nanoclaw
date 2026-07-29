@@ -45,7 +45,12 @@ import {
   storeMessage,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
-import { resolveGroupFolderPath } from './group-folder.js';
+import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
+import {
+  handleGoogleApprovalCommand,
+  recoverGoogleApprovalWork,
+  waitForGoogleExecutions,
+} from './google-workspace.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
@@ -747,6 +752,7 @@ async function main(): Promise<void> {
     logger.info({ signal }, 'Shutdown signal received');
     proxyServer.close();
     await queue.shutdown(10000);
+    await waitForGoogleExecutions();
     for (const ch of channels) await ch.disconnect();
     process.exit(0);
   };
@@ -825,6 +831,35 @@ async function main(): Promise<void> {
       }
       storeMessage(msg);
     },
+    onHostCommand: async (
+      command: string,
+      args: string,
+      chatJid: string,
+      msg: NewMessage,
+    ) => {
+      if (command !== 'approve' && command !== 'reject') {
+        throw new Error(`Unsupported host command /${command}`);
+      }
+      const outcome = await handleGoogleApprovalCommand(
+        command,
+        args,
+        chatJid,
+        msg.sender,
+        resolveGroupIpcPath,
+        async (targetJid, text) => {
+          const targetChannel = findChannel(channels, targetJid);
+          if (!targetChannel) {
+            throw new Error(`No channel owns approval target ${targetJid}`);
+          }
+          if (targetChannel.sendMessageStrict) {
+            await targetChannel.sendMessageStrict(targetJid, text);
+          } else {
+            await targetChannel.sendMessage(targetJid, text);
+          }
+        },
+      );
+      return { reply: outcome.reply };
+    },
     onChatMetadata: (
       chatJid: string,
       timestamp: string,
@@ -855,6 +890,17 @@ async function main(): Promise<void> {
     logger.fatal('No channels connected');
     process.exit(1);
   }
+  recoverGoogleApprovalWork(resolveGroupIpcPath, async (targetJid, text) => {
+    const targetChannel = findChannel(channels, targetJid);
+    if (!targetChannel) {
+      throw new Error(`No channel owns approval target ${targetJid}`);
+    }
+    if (targetChannel.sendMessageStrict) {
+      await targetChannel.sendMessageStrict(targetJid, text);
+    } else {
+      await targetChannel.sendMessage(targetJid, text);
+    }
+  });
 
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
@@ -877,6 +923,14 @@ async function main(): Promise<void> {
     sendMessage: (jid, text) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
+      return channel.sendMessage(jid, text);
+    },
+    sendApprovalMessage: (jid, text) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) throw new Error(`No channel for JID: ${jid}`);
+      if (channel.sendMessageStrict) {
+        return channel.sendMessageStrict(jid, text);
+      }
       return channel.sendMessage(jid, text);
     },
     sendVoice: (jid, audioPath) => {

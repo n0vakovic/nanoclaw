@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "gogPath": "/home/USER/.local/bin/gog",
+  "approvals": {
+    "telegramChatJid": "tg:PRIVATE_CHAT_ID",
+    "telegramUserIds": ["OWNER_TELEGRAM_USER_ID"],
+    "ttlSeconds": 600
+  },
+  "accounts": {
+    "work": {
+      "email": "you@work.example",
+      "groups": ["main"]
+    }
+  },
+  "calendars": {
+    "work_primary": {
+      "account": "work",
+      "calendarId": "primary",
+      "groups": ["main"],
+      "shared": false,
+      "read": true,
+      "create": "manual",
+      "update": "manual"
+    }
+  },
+  "docs": {
+    "work_docs": {
+      "account": "work",
+      "groups": ["main"],
+      "read": true
+    }
+  }
+}

@@ -1,5 +1,6 @@
 import {
   Channel,
+  OnHostCommand,
   OnInboundMessage,
   OnChatMetadata,
   RegisteredGroup,
@@ -7,6 +8,7 @@ import {
 
 export interface ChannelOpts {
   onMessage: OnInboundMessage;
+  onHostCommand?: OnHostCommand;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
 }

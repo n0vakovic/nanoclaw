@@ -27,12 +27,13 @@ import {
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
+  NewMessage,
   OnChatMetadata,
   OnInboundMessage,
   RegisteredGroup,
 } from '../types.js';
 
-export interface TelegramChannelOpts {
+export interface TelegramChannelOpts extends ChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
@@ -446,6 +447,45 @@ export class TelegramChannel implements Channel {
       ctx.reply(`${ASSISTANT_NAME} is online.`);
     });
 
+    for (const command of ['approve', 'reject']) {
+      this.bot.command(command, async (ctx) => {
+        if (!this.opts.onHostCommand) {
+          await ctx.reply('Host approval commands are not configured.');
+          return;
+        }
+        const chatJid = `tg:${ctx.chat.id}`;
+        const commandMessage = ctx.message;
+        if (!commandMessage) return;
+        const sender = ctx.from?.id.toString() || '';
+        const senderName =
+          ctx.from?.first_name || ctx.from?.username || sender || 'Unknown';
+        const message: NewMessage = {
+          id: commandMessage.message_id.toString(),
+          chat_jid: chatJid,
+          sender,
+          sender_name: senderName,
+          content: commandMessage.text || `/${command}`,
+          timestamp: new Date(commandMessage.date * 1000).toISOString(),
+          is_from_me: false,
+        };
+        const args = ctx.match?.trim() || '';
+        try {
+          const result = await this.opts.onHostCommand(
+            command,
+            args,
+            chatJid,
+            message,
+          );
+          await ctx.reply(result.reply);
+        } catch (err) {
+          logger.warn({ err, command, chatJid, sender }, 'Host command failed');
+          await ctx.reply(
+            err instanceof Error ? err.message : 'Host command failed.',
+          );
+        }
+      });
+    }
+
     this.bot.on('message:text', async (ctx) => {
       // Skip commands
       if (ctx.message.text.startsWith('/')) return;
@@ -832,29 +872,31 @@ export class TelegramChannel implements Channel {
     });
   }
 
-  async sendMessage(jid: string, text: string): Promise<void> {
+  async sendMessageStrict(jid: string, text: string): Promise<void> {
     if (!this.bot) {
-      logger.warn('Telegram bot not initialized');
-      return;
+      throw new Error('Telegram bot not initialized');
     }
+    const numericId = jid.replace(/^tg:/, '');
 
-    try {
-      const numericId = jid.replace(/^tg:/, '');
-
-      // Telegram has a 4096 character limit per message — split if needed
-      const MAX_LENGTH = 4096;
-      if (text.length <= MAX_LENGTH) {
-        await sendTelegramMessage(this.bot.api, numericId, text);
-      } else {
-        for (let i = 0; i < text.length; i += MAX_LENGTH) {
-          await sendTelegramMessage(
-            this.bot.api,
-            numericId,
-            text.slice(i, i + MAX_LENGTH),
-          );
-        }
+    // Telegram has a 4096 character limit per message — split if needed
+    const MAX_LENGTH = 4096;
+    if (text.length <= MAX_LENGTH) {
+      await sendTelegramMessage(this.bot.api, numericId, text);
+    } else {
+      for (let i = 0; i < text.length; i += MAX_LENGTH) {
+        await sendTelegramMessage(
+          this.bot.api,
+          numericId,
+          text.slice(i, i + MAX_LENGTH),
+        );
       }
-      logger.info({ jid, length: text.length }, 'Telegram message sent');
+    }
+    logger.info({ jid, length: text.length }, 'Telegram message sent');
+  }
+
+  async sendMessage(jid: string, text: string): Promise<void> {
+    try {
+      await this.sendMessageStrict(jid, text);
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Telegram message');
     }

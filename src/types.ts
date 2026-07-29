@@ -83,6 +83,9 @@ export interface Channel {
   name: string;
   connect(): Promise<void>;
   sendMessage(jid: string, text: string): Promise<void>;
+  // Optional strict variant for security-sensitive notifications where the
+  // caller must know whether delivery failed.
+  sendMessageStrict?(jid: string, text: string): Promise<void>;
   isConnected(): boolean;
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;
@@ -108,6 +111,19 @@ export interface Channel {
 
 // Callback type that channels use to deliver inbound messages
 export type OnInboundMessage = (chatJid: string, message: NewMessage) => void;
+
+export interface ChannelCommandResult {
+  reply: string;
+}
+
+// Commands that must be authorized and executed by the host (rather than
+// interpreted by an agent) use this callback.
+export type OnHostCommand = (
+  command: string,
+  args: string,
+  chatJid: string,
+  message: NewMessage,
+) => Promise<ChannelCommandResult>;
 
 // Callback for chat metadata discovery.
 // name is optional — channels that deliver names inline (Telegram) pass it here;

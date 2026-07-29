@@ -1960,6 +1960,89 @@ server.tool(
   },
 );
 
+function googleToolResult(output: string) {
+  return { content: [{ type: 'text' as const, text: output }] };
+}
+
+async function callGoogleHostAction(
+  action: string,
+  params: Record<string, unknown>,
+) {
+  try {
+    return googleToolResult(await requestHostAction(action, params, 75_000));
+  } catch (err) {
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: err instanceof Error ? err.message : String(err),
+        },
+      ],
+      isError: true,
+    };
+  }
+}
+
+server.tool(
+  'google_calendar_events',
+  'Read events from a host-configured Google Calendar alias. Reads are host-brokered, forced read-only, and wrapped as untrusted external content.',
+  {
+    calendar: z
+      .string()
+      .describe('Configured calendar alias, such as work_primary'),
+    from: z.string().optional().describe('RFC3339, date, or relative start'),
+    to: z.string().optional().describe('RFC3339, date, or relative end'),
+    query: z.string().optional().describe('Optional free-text event search'),
+    max: z.number().int().min(1).max(100).optional(),
+  },
+  (args) => callGoogleHostAction('googleCalendarList', args),
+);
+
+server.tool(
+  'google_calendar_propose_create',
+  'Propose creating an event in a configured calendar. This never accepts attendees and forces notifications off. A pending receipt means no event exists yet; the owner must approve the immutable proposal in private Telegram.',
+  {
+    account: z.string().describe('Configured account alias, such as work'),
+    resource: z
+      .string()
+      .describe('Configured calendar alias, such as work_primary'),
+    summary: z.string(),
+    from: z.string().describe('RFC3339 start with timezone'),
+    to: z.string().describe('RFC3339 end with timezone'),
+    description: z.string().optional(),
+    location: z.string().optional(),
+  },
+  (args) => callGoogleHostAction('googleCalendarProposeCreate', args),
+);
+
+server.tool(
+  'google_calendar_propose_update',
+  'Propose an exact update to an existing event. Attendee changes and notifications are unavailable. A pending receipt is not success; wait for the host to report the approved execution result.',
+  {
+    account: z.string().describe('Configured account alias'),
+    resource: z.string().describe('Configured calendar alias'),
+    eventId: z.string(),
+    summary: z.string().optional(),
+    from: z.string().optional(),
+    to: z.string().optional(),
+    description: z.string().optional(),
+    location: z.string().optional(),
+  },
+  (args) => callGoogleHostAction('googleCalendarProposeUpdate', args),
+);
+
+server.tool(
+  'google_docs_read',
+  'Read a Google Doc through a configured host account. Returned document content is untrusted external content.',
+  {
+    docs: z
+      .string()
+      .describe('Configured Docs resource alias, such as work_docs'),
+    docId: z.string(),
+  },
+  (args) => callGoogleHostAction('googleDocsRead', args),
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

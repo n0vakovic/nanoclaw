@@ -17,6 +17,7 @@ import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
+  sendApprovalMessage?: (jid: string, text: string) => Promise<void>;
   sendVoice: (jid: string, audioPath: string) => Promise<void>;
   sendAudio: (
     jid: string,
@@ -54,6 +55,50 @@ export interface IpcDeps {
 let ipcWatcherRunning = false;
 
 const CONTAINER_IPC_PREFIX = '/workspace/ipc/';
+const ACTION_REQUEST_ID_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,127}$/;
+
+export function _assertValidActionRequest(request: ActionRequest): void {
+  if (
+    !request ||
+    typeof request.action !== 'string' ||
+    !request.action ||
+    typeof request.requestId !== 'string' ||
+    !ACTION_REQUEST_ID_PATTERN.test(request.requestId)
+  ) {
+    throw new Error('Invalid host action request envelope');
+  }
+  if (
+    request.params !== undefined &&
+    (!request.params ||
+      typeof request.params !== 'object' ||
+      Array.isArray(request.params))
+  ) {
+    throw new Error('Invalid host action params');
+  }
+}
+
+export function _writeActionResultExclusive(
+  resultDir: string,
+  requestId: string,
+  result: unknown,
+): void {
+  if (!ACTION_REQUEST_ID_PATTERN.test(requestId)) {
+    throw new Error('Invalid host action result request ID');
+  }
+  fs.mkdirSync(resultDir, { recursive: true });
+  const resultPath = path.join(resultDir, `${requestId}.json`);
+  const flags =
+    fs.constants.O_WRONLY |
+    fs.constants.O_CREAT |
+    fs.constants.O_EXCL |
+    (fs.constants.O_NOFOLLOW || 0);
+  const fd = fs.openSync(resultPath, flags, 0o600);
+  try {
+    fs.writeFileSync(fd, JSON.stringify(result, null, 2));
+  } finally {
+    fs.closeSync(fd);
+  }
+}
 
 /**
  * Translate a container-visible path to its host-side equivalent for the
@@ -308,19 +353,24 @@ export function startIpcWatcher(deps: IpcDeps): void {
               const request = JSON.parse(
                 fs.readFileSync(filePath, 'utf-8'),
               ) as ActionRequest;
+              _assertValidActionRequest(request);
               fs.unlinkSync(filePath);
               dispatchAction(request, {
                 sourceGroup,
+                sourceChatJid: Object.entries(registeredGroups).find(
+                  ([, group]) => group.folder === sourceGroup,
+                )?.[0],
                 groupIpcDir: path.join(ipcBaseDir, sourceGroup),
                 isMain,
+                sendMessage: deps.sendApprovalMessage || deps.sendMessage,
                 registeredGroups: deps.registeredGroups,
                 updateRegisteredGroup: deps.registerGroup,
               })
                 .then((result) => {
-                  fs.mkdirSync(actionResultsDir, { recursive: true });
-                  fs.writeFileSync(
-                    path.join(actionResultsDir, `${result.requestId}.json`),
-                    JSON.stringify(result, null, 2),
+                  _writeActionResultExclusive(
+                    actionResultsDir,
+                    result.requestId,
+                    result,
                   );
                   logger.info(
                     { requestId: result.requestId, ok: result.ok, sourceGroup },

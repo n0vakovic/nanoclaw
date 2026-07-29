@@ -1155,6 +1155,42 @@ describe('TelegramChannel', () => {
 
       expect(ctx.reply).toHaveBeenCalledWith('Andy is online.');
     });
+
+    it.each(['approve', 'reject'])(
+      '/%s routes directly to the host command boundary',
+      async (command) => {
+        const onHostCommand = vi.fn().mockResolvedValue({
+          reply: `${command} accepted`,
+        });
+        const opts = createTestOpts({ onHostCommand });
+        const channel = new TelegramChannel('test-token', opts);
+        await channel.connect();
+
+        const handler = currentBot().commandHandlers.get(command)!;
+        const ctx = {
+          ...createTextCtx({
+            chatId: 555,
+            chatType: 'private',
+            text: `/${command} G-0123456789`,
+            fromId: 42,
+          }),
+          match: 'G-0123456789',
+        };
+        await handler(ctx);
+
+        expect(onHostCommand).toHaveBeenCalledWith(
+          command,
+          'G-0123456789',
+          'tg:555',
+          expect.objectContaining({
+            sender: '42',
+            content: `/${command} G-0123456789`,
+          }),
+        );
+        expect(ctx.reply).toHaveBeenCalledWith(`${command} accepted`);
+        expect(opts.onMessage).not.toHaveBeenCalled();
+      },
+    );
   });
 
   // --- Channel properties ---

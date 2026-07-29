@@ -82,6 +82,36 @@ function createSchema(database: Database.Database): void {
       container_config TEXT,
       requires_trigger INTEGER DEFAULT 1
     );
+    CREATE TABLE IF NOT EXISTS google_approvals (
+      id TEXT PRIMARY KEY,
+      source_group TEXT NOT NULL,
+      source_chat_jid TEXT NOT NULL,
+      operation TEXT NOT NULL,
+      account_alias TEXT NOT NULL,
+      resource_alias TEXT NOT NULL,
+      payload_json TEXT,
+      payload_hash TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      state TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      decided_at TEXT,
+      approver_chat_jid TEXT,
+      approver_sender_id TEXT,
+      execution_started_at TEXT,
+      completed_at TEXT,
+      result_json TEXT,
+      error TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_google_approvals_state
+      ON google_approvals(state, expires_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_google_approvals_active_payload
+      ON google_approvals(
+        source_group, operation, resource_alias, payload_hash
+      )
+      WHERE state IN (
+        'pending', 'approved', 'executing', 'needs_reconciliation'
+      );
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -156,6 +186,245 @@ export function initDatabase(): void {
 export function _initTestDatabase(): void {
   db = new Database(':memory:');
   createSchema(db);
+}
+
+export type GoogleApprovalState =
+  | 'pending'
+  | 'approved'
+  | 'executing'
+  | 'succeeded'
+  | 'rejected'
+  | 'expired'
+  | 'failed'
+  | 'needs_reconciliation';
+
+export interface GoogleApproval {
+  id: string;
+  source_group: string;
+  source_chat_jid: string;
+  operation: string;
+  account_alias: string;
+  resource_alias: string;
+  payload_json: string | null;
+  payload_hash: string;
+  summary: string;
+  state: GoogleApprovalState;
+  created_at: string;
+  expires_at: string;
+  decided_at: string | null;
+  approver_chat_jid: string | null;
+  approver_sender_id: string | null;
+  execution_started_at: string | null;
+  completed_at: string | null;
+  result_json: string | null;
+  error: string | null;
+}
+
+export function createGoogleApproval(
+  approval: Omit<
+    GoogleApproval,
+    | 'state'
+    | 'decided_at'
+    | 'approver_chat_jid'
+    | 'approver_sender_id'
+    | 'execution_started_at'
+    | 'completed_at'
+    | 'result_json'
+    | 'error'
+  >,
+): GoogleApproval {
+  db.prepare(
+    `INSERT INTO google_approvals (
+      id, source_group, source_chat_jid, operation, account_alias,
+      resource_alias, payload_json, payload_hash, summary, state,
+      created_at, expires_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+  ).run(
+    approval.id,
+    approval.source_group,
+    approval.source_chat_jid,
+    approval.operation,
+    approval.account_alias,
+    approval.resource_alias,
+    approval.payload_json,
+    approval.payload_hash,
+    approval.summary,
+    approval.created_at,
+    approval.expires_at,
+  );
+  return getGoogleApproval(approval.id)!;
+}
+
+export function getGoogleApproval(id: string): GoogleApproval | null {
+  return (
+    (db.prepare(`SELECT * FROM google_approvals WHERE id = ?`).get(id) as
+      | GoogleApproval
+      | undefined) ?? null
+  );
+}
+
+export function findActiveGoogleApproval(
+  sourceGroup: string,
+  operation: string,
+  resourceAlias: string,
+  payloadHash: string,
+  now = new Date(),
+): GoogleApproval | null {
+  return (
+    (db
+      .prepare(
+        `SELECT * FROM google_approvals
+         WHERE source_group = ?
+           AND operation = ?
+           AND resource_alias = ?
+           AND payload_hash = ?
+           AND state IN (
+             'pending', 'approved', 'executing', 'needs_reconciliation'
+           )
+           AND (state != 'pending' OR expires_at > ?)
+         ORDER BY created_at DESC
+         LIMIT 1`,
+      )
+      .get(
+        sourceGroup,
+        operation,
+        resourceAlias,
+        payloadHash,
+        now.toISOString(),
+      ) as GoogleApproval | undefined) ?? null
+  );
+}
+
+export function decideGoogleApproval(
+  id: string,
+  decision: 'approved' | 'rejected',
+  approverChatJid: string,
+  approverSenderId: string,
+  now = new Date(),
+): GoogleApproval {
+  const transaction = db.transaction(
+    (): { approval: GoogleApproval; expired: boolean } => {
+      const current = getGoogleApproval(id);
+      if (!current) throw new Error(`Unknown approval ${id}`);
+      if (current.state !== 'pending') {
+        throw new Error(`Approval ${id} is already ${current.state}`);
+      }
+      if (Date.parse(current.expires_at) <= now.getTime()) {
+        db.prepare(
+          `UPDATE google_approvals
+         SET state = 'expired', completed_at = ?, payload_json = NULL
+         WHERE id = ? AND state = 'pending'`,
+        ).run(now.toISOString(), id);
+        return { approval: getGoogleApproval(id)!, expired: true };
+      }
+      db.prepare(
+        `UPDATE google_approvals
+       SET state = ?, decided_at = ?, approver_chat_jid = ?,
+           approver_sender_id = ?, completed_at = CASE WHEN ? = 'rejected' THEN ? ELSE NULL END,
+           payload_json = CASE WHEN ? = 'rejected' THEN NULL ELSE payload_json END,
+           summary = CASE WHEN ? = 'rejected'
+             THEN operation || ' on ' || resource_alias
+             ELSE summary END
+       WHERE id = ? AND state = 'pending'`,
+      ).run(
+        decision,
+        now.toISOString(),
+        approverChatJid,
+        approverSenderId,
+        decision,
+        now.toISOString(),
+        decision,
+        decision,
+        id,
+      );
+      return { approval: getGoogleApproval(id)!, expired: false };
+    },
+  );
+  const outcome = transaction();
+  if (outcome.expired) throw new Error(`Approval ${id} has expired`);
+  return outcome.approval;
+}
+
+export function claimGoogleApproval(
+  id: string,
+  now = new Date(),
+): GoogleApproval {
+  const changed = db
+    .prepare(
+      `UPDATE google_approvals
+       SET state = 'executing', execution_started_at = ?
+       WHERE id = ? AND state = 'approved'`,
+    )
+    .run(now.toISOString(), id);
+  if (changed.changes !== 1) {
+    const current = getGoogleApproval(id);
+    throw new Error(
+      current
+        ? `Approval ${id} cannot execute from state ${current.state}`
+        : `Unknown approval ${id}`,
+    );
+  }
+  return getGoogleApproval(id)!;
+}
+
+export function finishGoogleApproval(
+  id: string,
+  outcome:
+    | { state: 'succeeded'; resultJson: string }
+    | { state: 'failed'; error: string }
+    | { state: 'needs_reconciliation'; error: string },
+  now = new Date(),
+): GoogleApproval {
+  const changed = db
+    .prepare(
+      `UPDATE google_approvals
+       SET state = ?, completed_at = ?, result_json = ?, error = ?,
+           payload_json = CASE
+             WHEN ? = 'needs_reconciliation' THEN payload_json
+             ELSE NULL END,
+           summary = CASE
+             WHEN ? = 'needs_reconciliation' THEN summary
+             ELSE operation || ' on ' || resource_alias END
+       WHERE id = ? AND state = 'executing'`,
+    )
+    .run(
+      outcome.state,
+      now.toISOString(),
+      outcome.state === 'succeeded' ? outcome.resultJson : null,
+      outcome.state === 'succeeded' ? null : outcome.error,
+      outcome.state,
+      outcome.state,
+      id,
+    );
+  if (changed.changes !== 1) {
+    throw new Error(`Approval ${id} is not executing`);
+  }
+  return getGoogleApproval(id)!;
+}
+
+export function expirePendingGoogleApprovals(now = new Date()): number {
+  return db
+    .prepare(
+      `UPDATE google_approvals
+       SET state = 'expired', completed_at = ?, payload_json = NULL,
+           summary = operation || ' on ' || resource_alias
+       WHERE state = 'pending' AND expires_at <= ?`,
+    )
+    .run(now.toISOString(), now.toISOString()).changes;
+}
+
+export function listGoogleApprovalsByState(
+  states: GoogleApprovalState[],
+): GoogleApproval[] {
+  if (states.length === 0) return [];
+  const placeholders = states.map(() => '?').join(', ');
+  return db
+    .prepare(
+      `SELECT * FROM google_approvals
+       WHERE state IN (${placeholders})
+       ORDER BY created_at ASC`,
+    )
+    .all(...states) as GoogleApproval[];
 }
 
 /**
