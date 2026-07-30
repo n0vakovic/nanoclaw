@@ -2043,6 +2043,59 @@ server.tool(
   (args) => callGoogleHostAction('googleDocsRead', args),
 );
 
+server.tool(
+  'google_gmail_search',
+  'Search messages in a host-configured Gmail account using Gmail query syntax. Results are metadata only, forced read-only, and wrapped as untrusted external content. Use google_gmail_message_read or google_gmail_thread_read to inspect content.',
+  {
+    gmail: z
+      .string()
+      .describe('Configured Gmail resource alias, such as work_mail'),
+    query: z
+      .string()
+      .describe(
+        'Gmail search query, such as "from:person@example.com newer_than:30d"',
+      ),
+    max: z.number().int().min(1).max(50).optional(),
+  },
+  (args) => callGoogleHostAction('googleGmailSearch', args),
+);
+
+server.tool(
+  'google_gmail_recent_drafts',
+  'List recent server-side Gmail drafts from a configured account. This is a fixed read-only search for in:drafts; use the returned message ID with google_gmail_message_read to see the latest autosaved draft body.',
+  {
+    gmail: z
+      .string()
+      .describe('Configured Gmail resource alias, such as work_mail'),
+    max: z.number().int().min(1).max(50).optional(),
+  },
+  (args) => callGoogleHostAction('googleGmailRecentDrafts', args),
+);
+
+server.tool(
+  'google_gmail_message_read',
+  'Read one Gmail message, including a server-side draft message, by immutable message ID. Content is sanitized, forced read-only, and wrapped as untrusted external content.',
+  {
+    gmail: z
+      .string()
+      .describe('Configured Gmail resource alias, such as work_mail'),
+    messageId: z.string().describe('Message ID returned by Gmail search'),
+  },
+  (args) => callGoogleHostAction('googleGmailMessageRead', args),
+);
+
+server.tool(
+  'google_gmail_thread_read',
+  'Read a complete Gmail conversation by immutable thread ID. Content is sanitized, forced read-only, and wrapped as untrusted external content. Attachments are not downloaded.',
+  {
+    gmail: z
+      .string()
+      .describe('Configured Gmail resource alias, such as work_mail'),
+    threadId: z.string().describe('Thread ID returned by Gmail search'),
+  },
+  (args) => callGoogleHostAction('googleGmailThreadRead', args),
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

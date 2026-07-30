@@ -50,6 +50,13 @@ interface GoogleDocsPolicy {
   read?: boolean;
 }
 
+interface GoogleGmailPolicy {
+  account: string;
+  groups?: string[];
+  search?: boolean;
+  read?: boolean;
+}
+
 export interface GooglePolicy {
   version: 1;
   gogPath?: string;
@@ -61,6 +68,7 @@ export interface GooglePolicy {
   accounts: Record<string, GoogleAccountPolicy>;
   calendars?: Record<string, GoogleCalendarPolicy>;
   docs?: Record<string, GoogleDocsPolicy>;
+  gmail?: Record<string, GoogleGmailPolicy>;
 }
 
 export interface GoogleActionContext {
@@ -250,6 +258,31 @@ function validatePolicy(value: unknown): GooglePolicy {
       }
     }
   }
+  if (value.gmail !== undefined) {
+    if (!isRecord(value.gmail)) throw new Error('gmail must be an object');
+    for (const [alias, gmail] of Object.entries(value.gmail)) {
+      assertAlias(alias, 'Gmail alias');
+      if (
+        !isRecord(gmail) ||
+        typeof gmail.account !== 'string' ||
+        !value.accounts[gmail.account]
+      ) {
+        throw new Error(`Invalid Gmail resource "${alias}"`);
+      }
+      if (
+        gmail.groups !== undefined &&
+        (!Array.isArray(gmail.groups) ||
+          gmail.groups.some((group) => typeof group !== 'string'))
+      ) {
+        throw new Error(`Invalid Gmail groups for "${alias}"`);
+      }
+      for (const key of ['search', 'read']) {
+        if (gmail[key] !== undefined && typeof gmail[key] !== 'boolean') {
+          throw new Error(`Invalid Gmail ${key} mode for "${alias}"`);
+        }
+      }
+    }
+  }
   return value as unknown as GooglePolicy;
 }
 
@@ -330,6 +363,20 @@ function docsResource(
   };
 }
 
+function gmailResource(
+  policy: GooglePolicy,
+  alias: string,
+  sourceGroup: string,
+): { resource: GoogleGmailPolicy; account: GoogleAccountPolicy } {
+  const resource = policy.gmail?.[alias];
+  if (!resource) throw new Error(`Unknown Gmail alias "${alias}"`);
+  assertResourceGroup(resource.groups, sourceGroup, alias);
+  return {
+    resource,
+    account: accountFor(policy, resource.account, sourceGroup),
+  };
+}
+
 function commonGogArgs(
   accountEmail: string,
   exactCommand: string,
@@ -372,7 +419,11 @@ function gogEnvironment(): NodeJS.ProcessEnv {
 async function runGog(policy: GooglePolicy, args: string[]): Promise<string> {
   const gogPath = policy.gogPath || path.join(HOME_DIR, '.local', 'bin', 'gog');
   const diagnosticId = `GW-${randomBytes(5).toString('hex').toUpperCase()}`;
-  const command = args.slice(0, 2).join('.');
+  const exactCommandIndex = args.indexOf('--enable-commands-exact');
+  const command =
+    exactCommandIndex >= 0 && args[exactCommandIndex + 1]
+      ? args[exactCommandIndex + 1]
+      : args.slice(0, 2).join('.');
   const startedAt = Date.now();
   try {
     const { stdout, stderr } = await execFileAsync(gogPath, args, {
@@ -492,6 +543,126 @@ export async function googleDocsRead(
     '--max-bytes',
     String(MAX_DOC_CONTENT_BYTES),
     ...commonGogArgs(account.email, 'docs.cat', true),
+  ]);
+}
+
+function boundedGmailMax(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isInteger(value)
+    ? Math.min(Math.max(value, 1), 50)
+    : fallback;
+}
+
+function assertGmailId(value: unknown, label: string): asserts value is string {
+  assertString(value, label, 200);
+  if (!/^[A-Za-z0-9_-]{8,200}$/.test(value)) {
+    throw new Error(`Invalid Gmail ${label}`);
+  }
+}
+
+async function runGmailSearch(
+  alias: string,
+  query: string,
+  max: number,
+  sourceGroup: string,
+): Promise<string> {
+  if (query.trim().startsWith('--')) {
+    throw new Error('Gmail query must not start with a command flag');
+  }
+  const policy = loadGooglePolicy();
+  const { resource, account } = gmailResource(policy, alias, sourceGroup);
+  if (resource.search !== true) {
+    throw new Error(`Gmail "${alias}" is not searchable`);
+  }
+  return runGog(policy, [
+    'gmail',
+    'messages',
+    'search',
+    query,
+    '--max',
+    String(max),
+    ...commonGogArgs(account.email, 'gmail.messages.search', true),
+  ]);
+}
+
+export async function googleGmailSearch(
+  params: Record<string, unknown>,
+  sourceGroup: string,
+): Promise<string> {
+  assertExactKeys(params, ['gmail', 'query', 'max']);
+  const alias = params.gmail;
+  const query = params.query;
+  assertAlias(alias, 'gmail');
+  assertString(query, 'query', 1000);
+  return runGmailSearch(
+    alias,
+    query,
+    boundedGmailMax(params.max, 20),
+    sourceGroup,
+  );
+}
+
+export async function googleGmailRecentDrafts(
+  params: Record<string, unknown>,
+  sourceGroup: string,
+): Promise<string> {
+  assertExactKeys(params, ['gmail', 'max']);
+  const alias = params.gmail;
+  assertAlias(alias, 'gmail');
+  return runGmailSearch(
+    alias,
+    'in:drafts',
+    boundedGmailMax(params.max, 10),
+    sourceGroup,
+  );
+}
+
+export async function googleGmailMessageRead(
+  params: Record<string, unknown>,
+  sourceGroup: string,
+): Promise<string> {
+  assertExactKeys(params, ['gmail', 'messageId']);
+  const alias = params.gmail;
+  const messageId = params.messageId;
+  assertAlias(alias, 'gmail');
+  assertGmailId(messageId, 'messageId');
+  const policy = loadGooglePolicy();
+  const { resource, account } = gmailResource(policy, alias, sourceGroup);
+  if (resource.read !== true) {
+    throw new Error(`Gmail "${alias}" messages are not readable`);
+  }
+  return runGog(policy, [
+    'gmail',
+    'get',
+    messageId,
+    '--format',
+    'full',
+    '--sanitize-content',
+    ...commonGogArgs(account.email, 'gmail.get', true),
+  ]);
+}
+
+export async function googleGmailThreadRead(
+  params: Record<string, unknown>,
+  sourceGroup: string,
+): Promise<string> {
+  assertExactKeys(params, ['gmail', 'threadId']);
+  const alias = params.gmail;
+  const threadId = params.threadId;
+  assertAlias(alias, 'gmail');
+  assertGmailId(threadId, 'threadId');
+  const policy = loadGooglePolicy();
+  const { resource, account } = gmailResource(policy, alias, sourceGroup);
+  if (resource.read !== true) {
+    throw new Error(`Gmail "${alias}" threads are not readable`);
+  }
+  return runGog(policy, [
+    'gmail',
+    'thread',
+    'get',
+    threadId,
+    '--full',
+    '--sanitize-content',
+    ...commonGogArgs(account.email, 'gmail.thread.get', true),
   ]);
 }
 

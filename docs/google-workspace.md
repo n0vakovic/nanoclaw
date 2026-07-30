@@ -1,8 +1,8 @@
 # Host-brokered Google Workspace
 
-NanoClaw exposes narrow Google Calendar actions and read-only Docs access
-through the host. The `gog` binary and its credentials stay outside agent
-containers. There is no generic command or argument passthrough.
+NanoClaw exposes narrow Google Calendar actions plus read-only Docs and Gmail
+access through the host. The `gog` binary and its credentials stay outside
+agent containers. There is no generic command or argument passthrough.
 
 ## Configure
 
@@ -50,10 +50,11 @@ because the external write may have succeeded before the process stopped.
 
 - Calendar attendees and invitation changes are not accepted.
 - Calendar notifications are always `none`.
-- Deletes, sharing changes, moves, Gmail sends, and arbitrary `gog` commands
-  have no exposed action.
+- Deletes, sharing changes, moves, Gmail sends/replies/forwards, label changes,
+  draft mutations, and arbitrary `gog` commands have no exposed action.
 - Reads force `--readonly`, `--no-input`, bounded output, and untrusted-content
   wrapping.
+- Gmail message and thread reads additionally force content sanitization.
 - Writes execute only the payload stored in SQLite, never command arguments
   supplied during approval.
 - Ambiguous mutation timeouts become `needs_reconciliation`; they are never
@@ -65,6 +66,10 @@ because the external write may have succeeded before the process stopped.
 - `google_calendar_propose_create`
 - `google_calendar_propose_update`
 - `google_docs_read`
+- `google_gmail_search`
+- `google_gmail_recent_drafts`
+- `google_gmail_message_read`
+- `google_gmail_thread_read`
 
 Proposal receipts mean a write is pending; they are never proof that the
 external mutation succeeded.
@@ -72,3 +77,9 @@ external mutation succeeded.
 Docs create/append/replace and Drive uploads remain tracked in GitHub issues
 #189 and #190. They are intentionally not exposed until document concurrency,
 folder scoping, and host-owned file staging are implemented.
+
+Gmail search accepts standard Gmail query syntax. Draft listing is a fixed
+`in:drafts` search ordered by Gmail; the returned message ID can be passed to
+`google_gmail_message_read` to retrieve the latest server-autosaved body.
+Unsynced text that exists only in an open browser tab is not available.
+Attachment download is deliberately not exposed yet.

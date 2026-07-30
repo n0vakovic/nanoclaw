@@ -67,6 +67,14 @@ function writePolicy(gogPath: string): void {
           update: 'manual',
         },
       },
+      gmail: {
+        work_mail: {
+          account: 'work',
+          groups: ['main'],
+          search: true,
+          read: true,
+        },
+      },
     }),
   );
 }
@@ -100,6 +108,105 @@ describe('Google host broker', () => {
     expect(argv).toContain('--wrap-untrusted');
     expect(argv).toContain('--no-input');
     expect(argv).toContain('--gmail-no-send');
+  });
+
+  it('searches Gmail messages through the exact read-only command', async () => {
+    writePolicy(installFakeGog());
+    const google = await import('./google-workspace.js');
+
+    await google.googleGmailSearch(
+      {
+        gmail: 'work_mail',
+        query: 'from:person@example.com newer_than:30d',
+        max: 12,
+      },
+      'main',
+    );
+
+    const argv = JSON.parse(
+      fs.readFileSync(process.env.GOG_ARGS_LOG!, 'utf8').trim(),
+    ) as string[];
+    expect(argv.slice(0, 4)).toEqual([
+      'gmail',
+      'messages',
+      'search',
+      'from:person@example.com newer_than:30d',
+    ]);
+    expect(argv).toContain('12');
+    expect(argv).toContain('--readonly');
+    expect(argv).toContain('--wrap-untrusted');
+    expect(argv).toContain('--gmail-no-send');
+    expect(argv).toContain('gmail.messages.search');
+    expect(argv).not.toContain('--include-body');
+  });
+
+  it('lists drafts with a fixed read-only Gmail query', async () => {
+    writePolicy(installFakeGog());
+    const google = await import('./google-workspace.js');
+
+    await google.googleGmailRecentDrafts(
+      { gmail: 'work_mail', max: 1 },
+      'main',
+    );
+
+    const argv = JSON.parse(
+      fs.readFileSync(process.env.GOG_ARGS_LOG!, 'utf8').trim(),
+    ) as string[];
+    expect(argv.slice(0, 4)).toEqual([
+      'gmail',
+      'messages',
+      'search',
+      'in:drafts',
+    ]);
+    expect(argv).toContain('--max');
+    expect(argv).toContain('1');
+    expect(argv).toContain('--readonly');
+    expect(argv).toContain('gmail.messages.search');
+  });
+
+  it('reads Gmail messages with content sanitization and no mutation flags', async () => {
+    writePolicy(installFakeGog());
+    const google = await import('./google-workspace.js');
+
+    await google.googleGmailMessageRead(
+      { gmail: 'work_mail', messageId: '18abcdef0123456' },
+      'main',
+    );
+
+    const argv = JSON.parse(
+      fs.readFileSync(process.env.GOG_ARGS_LOG!, 'utf8').trim(),
+    ) as string[];
+    expect(argv.slice(0, 3)).toEqual(['gmail', 'get', '18abcdef0123456']);
+    expect(argv).toContain('--sanitize-content');
+    expect(argv).toContain('--readonly');
+    expect(argv).toContain('--gmail-no-send');
+    expect(argv).toContain('gmail.get');
+    expect(argv).not.toContain('--download');
+  });
+
+  it('reads complete Gmail threads without downloading attachments', async () => {
+    writePolicy(installFakeGog());
+    const google = await import('./google-workspace.js');
+
+    await google.googleGmailThreadRead(
+      { gmail: 'work_mail', threadId: '18abcdef0123456' },
+      'main',
+    );
+
+    const argv = JSON.parse(
+      fs.readFileSync(process.env.GOG_ARGS_LOG!, 'utf8').trim(),
+    ) as string[];
+    expect(argv.slice(0, 4)).toEqual([
+      'gmail',
+      'thread',
+      'get',
+      '18abcdef0123456',
+    ]);
+    expect(argv).toContain('--full');
+    expect(argv).toContain('--sanitize-content');
+    expect(argv).toContain('--readonly');
+    expect(argv).toContain('gmail.thread.get');
+    expect(argv).not.toContain('--download');
   });
 
   it('stores an immutable proposal and executes only after owner approval', async () => {

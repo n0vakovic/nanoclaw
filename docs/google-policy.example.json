@@ -29,5 +29,13 @@
       "groups": ["main"],
       "read": true
     }
+  },
+  "gmail": {
+    "work_mail": {
+      "account": "work",
+      "groups": ["main"],
+      "search": true,
+      "read": true
+    }
   }
 }
