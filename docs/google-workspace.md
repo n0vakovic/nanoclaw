@@ -29,9 +29,12 @@ aliases, or permissions fail closed.
 
 ## Approval flow
 
-The owner approves with `/approve G-XXXXXXXXXX` or rejects with
-`/reject G-XXXXXXXXXX`. Only the configured private Telegram chat and exact
-Telegram user ID are accepted. Natural-language confirmation is ignored.
+The private Telegram approval message includes native **Approve** and **Reject**
+buttons. Button callbacks pass through the same host authorization boundary as
+typed commands, and the controls are removed after a recorded decision.
+`/approve G-XXXXXXXXXX` and `/reject G-XXXXXXXXXX` remain available as recovery
+fallbacks. Only the configured private Telegram chat and exact Telegram user ID
+are accepted. Natural-language confirmation is ignored.
 
 Approval freezes and hashes the exact payload and resolved account/calendar
 target. Calendar updates also freeze an event snapshot. A changed event or

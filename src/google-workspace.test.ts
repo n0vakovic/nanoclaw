@@ -107,7 +107,11 @@ describe('Google host broker', () => {
     const db = await import('./db.js');
     db._initTestDatabase();
     const google = await import('./google-workspace.js');
-    const notifications: Array<{ jid: string; text: string }> = [];
+    const notifications: Array<{
+      jid: string;
+      text: string;
+      approvalId?: string;
+    }> = [];
 
     const receipt = JSON.parse(
       await google.proposeGoogleWrite(
@@ -123,8 +127,8 @@ describe('Google host broker', () => {
           sourceGroup: 'main',
           sourceChatJid: 'tg:100',
           groupIpcDir: tempDir,
-          sendMessage: async (jid, text) => {
-            notifications.push({ jid, text });
+          sendMessage: async (jid, text, approvalId) => {
+            notifications.push({ jid, text, approvalId });
           },
         },
       ),
@@ -132,6 +136,7 @@ describe('Google host broker', () => {
 
     expect(fs.existsSync(process.env.GOG_ARGS_LOG!)).toBe(false);
     expect(notifications[0].jid).toBe('tg:100');
+    expect(notifications[0].approvalId).toBe(receipt.approvalId);
     expect(db.getGoogleApproval(receipt.approvalId)?.state).toBe('pending');
 
     const command = await google.handleGoogleApprovalCommand(
@@ -225,5 +230,38 @@ describe('Google host broker', () => {
     const approval = db.getGoogleApproval(receipt.approvalId);
     expect(approval?.payload_json).not.toBeNull();
     expect(approval?.error).toContain('external outcome is unknown');
+  });
+
+  it('expires a pending proposal before accepting a delayed decision', async () => {
+    writePolicy(installFakeGog());
+    const db = await import('./db.js');
+    db._initTestDatabase();
+    db.createGoogleApproval({
+      id: 'G-0123456789',
+      source_group: 'main',
+      source_chat_jid: 'tg:100',
+      operation: 'calendar.create',
+      account_alias: 'work',
+      resource_alias: 'work_primary',
+      payload_json: '{}',
+      payload_hash: 'unused-after-expiry',
+      summary: 'Expired proposal',
+      created_at: '2026-01-01T00:00:00.000Z',
+      expires_at: '2026-01-01T00:01:00.000Z',
+    });
+    const google = await import('./google-workspace.js');
+
+    const result = await google.handleGoogleApprovalCommand(
+      'approve',
+      'G-0123456789',
+      'tg:100',
+      '42',
+      () => tempDir,
+      async () => {},
+    );
+
+    expect(result.reply).toContain('already expired');
+    expect(db.getGoogleApproval('G-0123456789')?.state).toBe('expired');
+    expect(fs.existsSync(process.env.GOG_ARGS_LOG!)).toBe(false);
   });
 });

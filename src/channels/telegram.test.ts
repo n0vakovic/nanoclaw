@@ -83,6 +83,8 @@ vi.mock('grammy', () => ({
       sendMessage: vi.fn().mockResolvedValue(undefined),
       sendChatAction: vi.fn().mockResolvedValue(undefined),
       getFile: vi.fn().mockResolvedValue({ file_path: 'voice/file_42.ogg' }),
+      answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+      editMessageReplyMarkup: vi.fn().mockResolvedValue(undefined),
       config: { use: vi.fn() },
     };
 
@@ -1191,6 +1193,133 @@ describe('TelegramChannel', () => {
         expect(opts.onMessage).not.toHaveBeenCalled();
       },
     );
+
+    it('sends Google approvals with native inline controls', async () => {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      await channel.connect();
+
+      await channel.sendApprovalMessageStrict(
+        'tg:555',
+        'Approval required',
+        'G-0123456789',
+      );
+
+      expect(currentBot().api.sendMessage).toHaveBeenCalledWith(
+        '555',
+        'Approval required',
+        expect.objectContaining({
+          reply_markup: {
+            inline_keyboard: [
+              [
+                {
+                  text: '✅ Approve',
+                  callback_data: 'google-approval:approve:G-0123456789',
+                },
+                {
+                  text: '❌ Reject',
+                  callback_data: 'google-approval:reject:G-0123456789',
+                },
+              ],
+            ],
+          },
+        }),
+      );
+    });
+
+    it.each(['approve', 'reject'])(
+      'routes an inline %s decision through the same host boundary',
+      async (command) => {
+        const onHostCommand = vi.fn().mockResolvedValue({
+          reply: `${command} accepted`,
+        });
+        const opts = createTestOpts({ onHostCommand });
+        const channel = new TelegramChannel('test-token', opts);
+        await channel.connect();
+
+        const handler = currentBot().filterHandlers.get(
+          'callback_query:data',
+        )![0];
+        const ctx = {
+          callbackQuery: {
+            id: 'callback-1',
+            data: `google-approval:${command}:G-0123456789`,
+            message: {
+              message_id: 77,
+              chat: { id: 555, type: 'private' },
+              text: 'Approval required',
+            },
+          },
+          from: {
+            id: 42,
+            first_name: 'Alice',
+            username: 'alice_user',
+          },
+          api: currentBot().api,
+          reply: vi.fn().mockResolvedValue(undefined),
+        };
+
+        await handler(ctx);
+
+        expect(onHostCommand).toHaveBeenCalledWith(
+          command,
+          'G-0123456789',
+          'tg:555',
+          expect.objectContaining({
+            id: 'callback-callback-1',
+            sender: '42',
+            content: `/${command} G-0123456789`,
+          }),
+        );
+        expect(currentBot().api.answerCallbackQuery).toHaveBeenCalledWith(
+          'callback-1',
+          { text: `${command} accepted` },
+        );
+        expect(currentBot().api.editMessageReplyMarkup).toHaveBeenCalledWith(
+          555,
+          77,
+          { reply_markup: { inline_keyboard: [] } },
+        );
+        expect(ctx.reply).toHaveBeenCalledWith(`${command} accepted`);
+        expect(opts.onMessage).not.toHaveBeenCalled();
+      },
+    );
+
+    it('leaves approval controls intact when callback authorization fails', async () => {
+      const onHostCommand = vi
+        .fn()
+        .mockRejectedValue(new Error('You are not authorized.'));
+      const channel = new TelegramChannel(
+        'test-token',
+        createTestOpts({ onHostCommand }),
+      );
+      await channel.connect();
+
+      const handler = currentBot().filterHandlers.get(
+        'callback_query:data',
+      )![0];
+      const ctx = {
+        callbackQuery: {
+          id: 'callback-denied',
+          data: 'google-approval:approve:G-0123456789',
+          message: {
+            message_id: 77,
+            chat: { id: 555, type: 'private' },
+          },
+        },
+        from: { id: 999, first_name: 'Mallory' },
+        api: currentBot().api,
+        reply: vi.fn(),
+      };
+
+      await handler(ctx);
+
+      expect(currentBot().api.answerCallbackQuery).toHaveBeenCalledWith(
+        'callback-denied',
+        { text: 'You are not authorized.', show_alert: true },
+      );
+      expect(currentBot().api.editMessageReplyMarkup).not.toHaveBeenCalled();
+      expect(ctx.reply).not.toHaveBeenCalled();
+    });
   });
 
   // --- Channel properties ---

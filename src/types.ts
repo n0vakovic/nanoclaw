@@ -86,6 +86,14 @@ export interface Channel {
   // Optional strict variant for security-sensitive notifications where the
   // caller must know whether delivery failed.
   sendMessageStrict?(jid: string, text: string): Promise<void>;
+  // Optional richer approval delivery. Telegram uses this to attach native
+  // inline Approve/Reject buttons without exposing a generic keyboard API to
+  // the rest of the host.
+  sendApprovalMessageStrict?(
+    jid: string,
+    text: string,
+    approvalId: string,
+  ): Promise<void>;
   isConnected(): boolean;
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;

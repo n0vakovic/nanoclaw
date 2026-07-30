@@ -67,7 +67,11 @@ export interface GoogleActionContext {
   sourceGroup: string;
   sourceChatJid: string;
   groupIpcDir: string;
-  sendMessage: (jid: string, text: string) => Promise<void>;
+  sendMessage: (
+    jid: string,
+    text: string,
+    approvalId?: string,
+  ) => Promise<void>;
 }
 
 interface GoogleCommandOutcome {
@@ -760,6 +764,7 @@ export async function proposeGoogleWrite(
       await ctx.sendMessage(
         policy.approvals.telegramChatJid,
         approvalPrompt(existing),
+        existing.id,
       );
     }
     return JSON.stringify({
@@ -798,6 +803,7 @@ export async function proposeGoogleWrite(
       await ctx.sendMessage(
         policy.approvals.telegramChatJid,
         approvalPrompt(raced),
+        raced.id,
       );
     }
     return JSON.stringify({
@@ -810,6 +816,7 @@ export async function proposeGoogleWrite(
   await ctx.sendMessage(
     policy.approvals.telegramChatJid,
     approvalPrompt(approval),
+    approval.id,
   );
   return JSON.stringify({
     status: 'pending_approval',
@@ -1099,6 +1106,7 @@ export async function handleGoogleApprovalCommand(
   if (!APPROVAL_ID_PATTERN.test(approvalId)) {
     throw new Error(`Usage: /${command} G-XXXXXXXXXX`);
   }
+  expirePendingGoogleApprovals(new Date());
   const current = getGoogleApproval(approvalId);
   if (!current) throw new Error(`Unknown approval ${approvalId}`);
   if (current.state !== 'pending') {

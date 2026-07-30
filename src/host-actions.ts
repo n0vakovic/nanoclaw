@@ -70,7 +70,11 @@ export interface ActionContext {
   sourceChatJid?: string;
   groupIpcDir: string;
   isMain?: boolean;
-  sendMessage?: (jid: string, text: string) => Promise<void>;
+  sendMessage?: (
+    jid: string,
+    text: string,
+    approvalId?: string,
+  ) => Promise<void>;
   registeredGroups?: () => Record<string, RegisteredGroup>;
   updateRegisteredGroup?: (jid: string, group: RegisteredGroup) => void;
 }

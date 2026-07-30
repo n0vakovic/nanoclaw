@@ -925,9 +925,12 @@ async function main(): Promise<void> {
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
       return channel.sendMessage(jid, text);
     },
-    sendApprovalMessage: (jid, text) => {
+    sendApprovalMessage: (jid, text, approvalId) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
+      if (approvalId && channel.sendApprovalMessageStrict) {
+        return channel.sendApprovalMessageStrict(jid, text, approvalId);
+      }
       if (channel.sendMessageStrict) {
         return channel.sendMessageStrict(jid, text);
       }

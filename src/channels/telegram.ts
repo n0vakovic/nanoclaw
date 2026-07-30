@@ -50,6 +50,19 @@ interface RetainedTelegramVoice {
   error?: unknown;
 }
 
+const GOOGLE_APPROVAL_ID_PATTERN = /^G-[A-F0-9]{10}$/;
+const GOOGLE_APPROVAL_CALLBACK_PATTERN =
+  /^google-approval:(approve|reject):(G-[A-F0-9]{10})$/;
+
+interface TelegramInlineKeyboard {
+  inline_keyboard: Array<
+    Array<{
+      text: string;
+      callback_data: string;
+    }>
+  >;
+}
+
 /**
  * Send a message with Telegram Markdown parse mode, falling back to plain text.
  * Claude's output naturally matches Telegram's Markdown v1 format:
@@ -59,7 +72,10 @@ async function sendTelegramMessage(
   api: { sendMessage: Api['sendMessage'] },
   chatId: string | number,
   text: string,
-  options: { message_thread_id?: number } = {},
+  options: {
+    message_thread_id?: number;
+    reply_markup?: TelegramInlineKeyboard;
+  } = {},
 ): Promise<void> {
   try {
     await api.sendMessage(chatId, text, {
@@ -486,6 +502,105 @@ export class TelegramChannel implements Channel {
       });
     }
 
+    this.bot.on('callback_query:data', async (ctx) => {
+      const match = GOOGLE_APPROVAL_CALLBACK_PATTERN.exec(
+        ctx.callbackQuery.data,
+      );
+      if (!match) return;
+
+      const callbackMessage = ctx.callbackQuery.message;
+      if (!callbackMessage) {
+        await ctx.api
+          .answerCallbackQuery(ctx.callbackQuery.id, {
+            text: 'This approval message is no longer available.',
+            show_alert: true,
+          })
+          .catch((err) =>
+            logger.warn({ err }, 'Failed to answer invalid approval callback'),
+          );
+        return;
+      }
+
+      const command = match[1];
+      const approvalId = match[2];
+      const chatJid = `tg:${callbackMessage.chat.id}`;
+      const sender = ctx.from.id.toString();
+      const senderName =
+        ctx.from.first_name || ctx.from.username || sender || 'Unknown';
+      const message: NewMessage = {
+        id: `callback-${ctx.callbackQuery.id}`,
+        chat_jid: chatJid,
+        sender,
+        sender_name: senderName,
+        content: `/${command} ${approvalId}`,
+        timestamp: new Date().toISOString(),
+        is_from_me: false,
+      };
+
+      try {
+        if (!this.opts.onHostCommand) {
+          throw new Error('Host approval commands are not configured.');
+        }
+        const result = await this.opts.onHostCommand(
+          command,
+          approvalId,
+          chatJid,
+          message,
+        );
+
+        const uiResults = await Promise.allSettled([
+          ctx.api.answerCallbackQuery(ctx.callbackQuery.id, {
+            text: result.reply.slice(0, 180),
+          }),
+          ctx.api.editMessageReplyMarkup(
+            callbackMessage.chat.id,
+            callbackMessage.message_id,
+            { reply_markup: { inline_keyboard: [] } },
+          ),
+        ]);
+        for (const uiResult of uiResults) {
+          if (uiResult.status === 'rejected') {
+            logger.warn(
+              {
+                err: uiResult.reason,
+                command,
+                approvalId,
+                chatJid,
+                sender,
+              },
+              'Failed to finalize Telegram approval controls',
+            );
+          }
+        }
+        try {
+          await ctx.reply(result.reply);
+        } catch (err) {
+          logger.warn(
+            { err, command, approvalId, chatJid, sender },
+            'Failed to send Telegram approval decision reply',
+          );
+        }
+      } catch (err) {
+        logger.warn(
+          { err, command, approvalId, chatJid, sender },
+          'Telegram approval callback failed',
+        );
+        const text =
+          err instanceof Error ? err.message : 'Host approval command failed.';
+        await ctx.api
+          .answerCallbackQuery(ctx.callbackQuery.id, {
+            text: text.slice(0, 180),
+            show_alert: true,
+          })
+          .catch((answerErr) =>
+            logger.warn(
+              { err: answerErr, command, approvalId, chatJid, sender },
+              'Failed to answer rejected Telegram approval callback',
+            ),
+          );
+      }
+    });
+
     this.bot.on('message:text', async (ctx) => {
       // Skip commands
       if (ctx.message.text.startsWith('/')) return;
@@ -870,6 +985,45 @@ export class TelegramChannel implements Channel {
         },
       });
     });
+  }
+
+  async sendApprovalMessageStrict(
+    jid: string,
+    text: string,
+    approvalId: string,
+  ): Promise<void> {
+    if (!this.bot) {
+      throw new Error('Telegram bot not initialized');
+    }
+    const normalizedApprovalId = approvalId.trim().toUpperCase();
+    if (!GOOGLE_APPROVAL_ID_PATTERN.test(normalizedApprovalId)) {
+      throw new Error('Invalid Google approval ID');
+    }
+    if (text.length > 4096) {
+      throw new Error('Telegram approval message exceeds 4096 characters');
+    }
+
+    const numericId = jid.replace(/^tg:/, '');
+    await sendTelegramMessage(this.bot.api, numericId, text, {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            {
+              text: '✅ Approve',
+              callback_data: `google-approval:approve:${normalizedApprovalId}`,
+            },
+            {
+              text: '❌ Reject',
+              callback_data: `google-approval:reject:${normalizedApprovalId}`,
+            },
+          ],
+        ],
+      },
+    });
+    logger.info(
+      { jid, approvalId: normalizedApprovalId, length: text.length },
+      'Telegram approval message sent',
+    );
   }
 
   async sendMessageStrict(jid: string, text: string): Promise<void> {

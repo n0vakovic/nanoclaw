@@ -17,7 +17,11 @@ import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
-  sendApprovalMessage?: (jid: string, text: string) => Promise<void>;
+  sendApprovalMessage?: (
+    jid: string,
+    text: string,
+    approvalId?: string,
+  ) => Promise<void>;
   sendVoice: (jid: string, audioPath: string) => Promise<void>;
   sendAudio: (
     jid: string,
