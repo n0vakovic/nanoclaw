@@ -1,8 +1,8 @@
 # Host-brokered Google Workspace
 
-NanoClaw exposes narrow Google Calendar actions plus read-only Docs and Gmail
-access through the host. The `gog` binary and its credentials stay outside
-agent containers. There is no generic command or argument passthrough.
+NanoClaw exposes narrow Google Calendar actions plus read-only Drive, Docs, and
+Gmail access through the host. The `gog` binary and its credentials stay
+outside agent containers. There is no generic command or argument passthrough.
 
 ## Configure
 
@@ -66,10 +66,13 @@ because the external write may have succeeded before the process stopped.
 - `google_calendar_propose_create`
 - `google_calendar_propose_update`
 - `google_docs_read`
+- `google_drive_search`
+- `google_drive_list_folder`
 - `google_gmail_search`
 - `google_gmail_recent_drafts`
 - `google_gmail_message_read`
 - `google_gmail_thread_read`
+- `google_gmail_workspace_links`
 
 Proposal receipts mean a write is pending; they are never proof that the
 external mutation succeeded.
@@ -78,8 +81,19 @@ Docs create/append/replace and Drive uploads remain tracked in GitHub issues
 #189 and #190. They are intentionally not exposed until document concurrency,
 folder scoping, and host-owned file staging are implemented.
 
+Drive search provides read-only discovery across files visible to the
+configured account. Folder listing accepts a folder ID and can only return its
+direct children; neither tool can download, move, share, or modify files. A
+discovered Google Doc ID can be passed to `google_docs_read`.
+
 Gmail search accepts standard Gmail query syntax. Draft listing is a fixed
 `in:drafts` search ordered by Gmail; the returned message ID can be passed to
 `google_gmail_message_read` to retrieve the latest server-autosaved body.
 Unsynced text that exists only in an open browser tab is not available.
 Attachment download is deliberately not exposed yet.
+
+Sanitized Gmail reads may omit links. `google_gmail_workspace_links` inspects
+the original thread only inside the host broker, discards all message text and
+HTML, rejects non-HTTPS and non-Google hosts, and returns canonical
+`drive.google.com` / `docs.google.com` resource IDs and URLs. This preserves the
+sanitizer boundary while allowing an agent to recover a shared file reference.

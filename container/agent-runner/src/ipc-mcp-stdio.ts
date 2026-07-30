@@ -2044,6 +2044,34 @@ server.tool(
 );
 
 server.tool(
+  'google_drive_search',
+  'Search files and folders visible to a host-configured Google Drive account. Results include stable file IDs and metadata, are forced read-only, and are wrapped as untrusted external content. Use this to discover a Doc ID before google_docs_read.',
+  {
+    drive: z
+      .string()
+      .describe('Configured Drive resource alias, such as work_drive'),
+    query: z
+      .string()
+      .describe('Drive full-text search terms, such as "coaching call Sahra"'),
+    max: z.number().int().min(1).max(100).optional(),
+  },
+  (args) => callGoogleHostAction('googleDriveSearch', args),
+);
+
+server.tool(
+  'google_drive_list_folder',
+  'List the direct children of a Google Drive folder discovered through google_drive_search. Listing is forced read-only and wrapped as untrusted external content.',
+  {
+    drive: z
+      .string()
+      .describe('Configured Drive resource alias, such as work_drive'),
+    folderId: z.string().describe('Folder ID returned by google_drive_search'),
+    max: z.number().int().min(1).max(100).optional(),
+  },
+  (args) => callGoogleHostAction('googleDriveListFolder', args),
+);
+
+server.tool(
   'google_gmail_search',
   'Search messages in a host-configured Gmail account using Gmail query syntax. Results are metadata only, forced read-only, and wrapped as untrusted external content. Use google_gmail_message_read or google_gmail_thread_read to inspect content.',
   {
@@ -2094,6 +2122,18 @@ server.tool(
     threadId: z.string().describe('Thread ID returned by Gmail search'),
   },
   (args) => callGoogleHostAction('googleGmailThreadRead', args),
+);
+
+server.tool(
+  'google_gmail_workspace_links',
+  'Extract only validated Google Drive and Google Docs resource links from a Gmail thread. The host inspects the original thread but discards all other unsanitized content, so this can recover links omitted by the normal email sanitizer without exposing raw email HTML or arbitrary URLs.',
+  {
+    gmail: z
+      .string()
+      .describe('Configured Gmail resource alias, such as work_mail'),
+    threadId: z.string().describe('Thread ID returned by Gmail search'),
+  },
+  (args) => callGoogleHostAction('googleGmailWorkspaceLinks', args),
 );
 
 // Start the stdio transport

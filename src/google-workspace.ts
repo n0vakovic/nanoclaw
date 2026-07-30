@@ -24,6 +24,7 @@ const MAX_DOC_CONTENT_BYTES = 500_000;
 const MAX_RESULT_BYTES = 2_000_000;
 const APPROVAL_ID_PATTERN = /^G-[A-F0-9]{10}$/;
 const DOC_ID_PATTERN = /^[A-Za-z0-9_-]{10,}$/;
+const DRIVE_ID_PATTERN = /^[A-Za-z0-9_-]{10,}$/;
 const EVENT_ID_PATTERN = /^[A-Za-z0-9_-]{3,}$/;
 
 export type GoogleWriteMode = 'deny' | 'manual' | 'auto';
@@ -50,6 +51,13 @@ interface GoogleDocsPolicy {
   read?: boolean;
 }
 
+interface GoogleDrivePolicy {
+  account: string;
+  groups?: string[];
+  search?: boolean;
+  list?: boolean;
+}
+
 interface GoogleGmailPolicy {
   account: string;
   groups?: string[];
@@ -68,6 +76,7 @@ export interface GooglePolicy {
   accounts: Record<string, GoogleAccountPolicy>;
   calendars?: Record<string, GoogleCalendarPolicy>;
   docs?: Record<string, GoogleDocsPolicy>;
+  drive?: Record<string, GoogleDrivePolicy>;
   gmail?: Record<string, GoogleGmailPolicy>;
 }
 
@@ -258,6 +267,31 @@ function validatePolicy(value: unknown): GooglePolicy {
       }
     }
   }
+  if (value.drive !== undefined) {
+    if (!isRecord(value.drive)) throw new Error('drive must be an object');
+    for (const [alias, drive] of Object.entries(value.drive)) {
+      assertAlias(alias, 'Drive alias');
+      if (
+        !isRecord(drive) ||
+        typeof drive.account !== 'string' ||
+        !value.accounts[drive.account]
+      ) {
+        throw new Error(`Invalid Drive resource "${alias}"`);
+      }
+      if (
+        drive.groups !== undefined &&
+        (!Array.isArray(drive.groups) ||
+          drive.groups.some((group) => typeof group !== 'string'))
+      ) {
+        throw new Error(`Invalid Drive groups for "${alias}"`);
+      }
+      for (const key of ['search', 'list']) {
+        if (drive[key] !== undefined && typeof drive[key] !== 'boolean') {
+          throw new Error(`Invalid Drive ${key} mode for "${alias}"`);
+        }
+      }
+    }
+  }
   if (value.gmail !== undefined) {
     if (!isRecord(value.gmail)) throw new Error('gmail must be an object');
     for (const [alias, gmail] of Object.entries(value.gmail)) {
@@ -356,6 +390,20 @@ function docsResource(
 ): { resource: GoogleDocsPolicy; account: GoogleAccountPolicy } {
   const resource = policy.docs?.[alias];
   if (!resource) throw new Error(`Unknown Docs alias "${alias}"`);
+  assertResourceGroup(resource.groups, sourceGroup, alias);
+  return {
+    resource,
+    account: accountFor(policy, resource.account, sourceGroup),
+  };
+}
+
+function driveResource(
+  policy: GooglePolicy,
+  alias: string,
+  sourceGroup: string,
+): { resource: GoogleDrivePolicy; account: GoogleAccountPolicy } {
+  const resource = policy.drive?.[alias];
+  if (!resource) throw new Error(`Unknown Drive alias "${alias}"`);
   assertResourceGroup(resource.groups, sourceGroup, alias);
   return {
     resource,
@@ -546,6 +594,67 @@ export async function googleDocsRead(
   ]);
 }
 
+function boundedDriveMax(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isInteger(value)
+    ? Math.min(Math.max(value, 1), 100)
+    : fallback;
+}
+
+export async function googleDriveSearch(
+  params: Record<string, unknown>,
+  sourceGroup: string,
+): Promise<string> {
+  assertExactKeys(params, ['drive', 'query', 'max']);
+  const alias = params.drive;
+  const query = params.query;
+  assertAlias(alias, 'drive');
+  assertString(query, 'query', 1000);
+  if (query.trim().startsWith('--')) {
+    throw new Error('Drive query must not start with a command flag');
+  }
+  const policy = loadGooglePolicy();
+  const { resource, account } = driveResource(policy, alias, sourceGroup);
+  if (resource.search !== true) {
+    throw new Error(`Drive "${alias}" is not searchable`);
+  }
+  return runGog(policy, [
+    'drive',
+    'search',
+    query,
+    '--max',
+    String(boundedDriveMax(params.max, 25)),
+    ...commonGogArgs(account.email, 'drive.search', true),
+  ]);
+}
+
+export async function googleDriveListFolder(
+  params: Record<string, unknown>,
+  sourceGroup: string,
+): Promise<string> {
+  assertExactKeys(params, ['drive', 'folderId', 'max']);
+  const alias = params.drive;
+  const folderId = params.folderId;
+  assertAlias(alias, 'drive');
+  assertString(folderId, 'folderId', 200);
+  if (!DRIVE_ID_PATTERN.test(folderId)) {
+    throw new Error('Invalid Google Drive folder ID');
+  }
+  const policy = loadGooglePolicy();
+  const { resource, account } = driveResource(policy, alias, sourceGroup);
+  if (resource.list !== true) {
+    throw new Error(`Drive "${alias}" folders are not browseable`);
+  }
+  return runGog(policy, [
+    'drive',
+    'ls',
+    '--parent',
+    folderId,
+    '--max',
+    String(boundedDriveMax(params.max, 50)),
+    ...commonGogArgs(account.email, 'drive.ls', true),
+  ]);
+}
+
 function boundedGmailMax(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isInteger(value)
     ? Math.min(Math.max(value, 1), 50)
@@ -557,6 +666,134 @@ function assertGmailId(value: unknown, label: string): asserts value is string {
   if (!/^[A-Za-z0-9_-]{8,200}$/.test(value)) {
     throw new Error(`Invalid Gmail ${label}`);
   }
+}
+
+function decodeLinkEntities(value: string): string {
+  const decodeCodePoint = (
+    original: string,
+    encoded: string,
+    radix: number,
+  ): string => {
+    const codePoint = parseInt(encoded, radix);
+    return Number.isInteger(codePoint) &&
+      codePoint >= 0 &&
+      codePoint <= 0x10ffff
+      ? String.fromCodePoint(codePoint)
+      : original;
+  };
+  return value
+    .replace(/&amp;/gi, '&')
+    .replace(/&#x([0-9a-f]+);/gi, (original: string, hex: string) =>
+      decodeCodePoint(original, hex, 16),
+    )
+    .replace(/&#(\d+);/g, (original: string, decimal: string) =>
+      decodeCodePoint(original, decimal, 10),
+    )
+    .replace(/=3D/gi, '=');
+}
+
+interface GoogleWorkspaceLink {
+  kind:
+    | 'document'
+    | 'spreadsheet'
+    | 'presentation'
+    | 'form'
+    | 'folder'
+    | 'file';
+  id: string;
+  url: string;
+}
+
+function canonicalGoogleWorkspaceLink(
+  candidate: string,
+): GoogleWorkspaceLink | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(decodeLinkEntities(candidate));
+  } catch {
+    return undefined;
+  }
+  if (parsed.protocol !== 'https:') return undefined;
+
+  const host = parsed.hostname.toLowerCase();
+  const pathParts = parsed.pathname.split('/').filter(Boolean);
+  let kind: GoogleWorkspaceLink['kind'];
+  let id: string | null | undefined;
+  let url: string;
+
+  if (host === 'docs.google.com') {
+    const type = pathParts[0];
+    const dIndex = pathParts.indexOf('d');
+    const usesPublishedFormId =
+      type === 'forms' && dIndex >= 0 && pathParts[dIndex + 1] === 'e';
+    id =
+      dIndex >= 0
+        ? pathParts[dIndex + (usesPublishedFormId ? 2 : 1)]
+        : undefined;
+    const kindByType: Record<string, GoogleWorkspaceLink['kind']> = {
+      document: 'document',
+      spreadsheets: 'spreadsheet',
+      presentation: 'presentation',
+      forms: 'form',
+    };
+    kind = kindByType[type];
+    if (!kind || !id || !DRIVE_ID_PATTERN.test(id)) return undefined;
+    url = `https://docs.google.com/${type}/d/${usesPublishedFormId ? 'e/' : ''}${id}`;
+  } else if (host === 'drive.google.com') {
+    const foldersIndex = pathParts.indexOf('folders');
+    const fileIndex = pathParts.indexOf('file');
+    if (foldersIndex >= 0) {
+      kind = 'folder';
+      id = pathParts[foldersIndex + 1];
+      if (!id || !DRIVE_ID_PATTERN.test(id)) return undefined;
+      url = `https://drive.google.com/drive/folders/${id}`;
+    } else if (fileIndex >= 0 && pathParts[fileIndex + 1] === 'd') {
+      kind = 'file';
+      id = pathParts[fileIndex + 2];
+      if (!id || !DRIVE_ID_PATTERN.test(id)) return undefined;
+      url = `https://drive.google.com/file/d/${id}`;
+    } else {
+      kind = 'file';
+      id = parsed.searchParams.get('id');
+      if (!id || !DRIVE_ID_PATTERN.test(id)) return undefined;
+      url = `https://drive.google.com/open?id=${id}`;
+    }
+  } else {
+    return undefined;
+  }
+
+  return { kind, id, url };
+}
+
+export function extractGoogleWorkspaceLinks(output: string): string {
+  const candidates = new Set<string>();
+  const collect = (value: unknown, depth: number): void => {
+    if (depth > 12) return;
+    if (typeof value === 'string') {
+      for (const match of decodeLinkEntities(value).matchAll(
+        /https?:\/\/[^\s<>"'\\]+/gi,
+      )) {
+        candidates.add(match[0].replace(/[),.;]+$/, ''));
+      }
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const child of value) collect(child, depth + 1);
+      return;
+    }
+    if (isRecord(value)) {
+      for (const child of Object.values(value)) collect(child, depth + 1);
+    }
+  };
+
+  collect(parsedJson(output), 0);
+  const links = [...candidates]
+    .map(canonicalGoogleWorkspaceLink)
+    .filter((link): link is GoogleWorkspaceLink => Boolean(link));
+  const unique = [
+    ...new Map(links.map((link) => [`${link.kind}:${link.id}`, link])).values(),
+  ];
+  return JSON.stringify({ links: unique });
 }
 
 async function runGmailSearch(
@@ -664,6 +901,31 @@ export async function googleGmailThreadRead(
     '--sanitize-content',
     ...commonGogArgs(account.email, 'gmail.thread.get', true),
   ]);
+}
+
+export async function googleGmailWorkspaceLinks(
+  params: Record<string, unknown>,
+  sourceGroup: string,
+): Promise<string> {
+  assertExactKeys(params, ['gmail', 'threadId']);
+  const alias = params.gmail;
+  const threadId = params.threadId;
+  assertAlias(alias, 'gmail');
+  assertGmailId(threadId, 'threadId');
+  const policy = loadGooglePolicy();
+  const { resource, account } = gmailResource(policy, alias, sourceGroup);
+  if (resource.read !== true) {
+    throw new Error(`Gmail "${alias}" threads are not readable`);
+  }
+  const output = await runGog(policy, [
+    'gmail',
+    'thread',
+    'get',
+    threadId,
+    '--full',
+    ...commonGogArgs(account.email, 'gmail.thread.get', true),
+  ]);
+  return extractGoogleWorkspaceLinks(output);
 }
 
 function canonicalJson(value: unknown): string {

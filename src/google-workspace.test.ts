@@ -67,6 +67,21 @@ function writePolicy(gogPath: string): void {
           update: 'manual',
         },
       },
+      docs: {
+        work_docs: {
+          account: 'work',
+          groups: ['main'],
+          read: true,
+        },
+      },
+      drive: {
+        work_drive: {
+          account: 'work',
+          groups: ['main'],
+          search: true,
+          list: true,
+        },
+      },
       gmail: {
         work_mail: {
           account: 'work',
@@ -108,6 +123,61 @@ describe('Google host broker', () => {
     expect(argv).toContain('--wrap-untrusted');
     expect(argv).toContain('--no-input');
     expect(argv).toContain('--gmail-no-send');
+  });
+
+  it('searches Drive through the exact read-only command', async () => {
+    writePolicy(installFakeGog());
+    const google = await import('./google-workspace.js');
+
+    await google.googleDriveSearch(
+      {
+        drive: 'work_drive',
+        query: 'coaching call Sahra',
+        max: 30,
+      },
+      'main',
+    );
+
+    const argv = JSON.parse(
+      fs.readFileSync(process.env.GOG_ARGS_LOG!, 'utf8').trim(),
+    ) as string[];
+    expect(argv.slice(0, 3)).toEqual([
+      'drive',
+      'search',
+      'coaching call Sahra',
+    ]);
+    expect(argv).toContain('--max');
+    expect(argv).toContain('30');
+    expect(argv).toContain('--readonly');
+    expect(argv).toContain('--wrap-untrusted');
+    expect(argv).toContain('--no-input');
+    expect(argv).toContain('drive.search');
+  });
+
+  it('lists only the requested Drive folder through a read-only command', async () => {
+    writePolicy(installFakeGog());
+    const google = await import('./google-workspace.js');
+
+    await google.googleDriveListFolder(
+      {
+        drive: 'work_drive',
+        folderId: 'folder_0123456789',
+        max: 40,
+      },
+      'main',
+    );
+
+    const argv = JSON.parse(
+      fs.readFileSync(process.env.GOG_ARGS_LOG!, 'utf8').trim(),
+    ) as string[];
+    expect(argv.slice(0, 2)).toEqual(['drive', 'ls']);
+    expect(argv).toContain('--parent');
+    expect(argv).toContain('folder_0123456789');
+    expect(argv).toContain('--max');
+    expect(argv).toContain('40');
+    expect(argv).toContain('--readonly');
+    expect(argv).toContain('--wrap-untrusted');
+    expect(argv).toContain('drive.ls');
   });
 
   it('searches Gmail messages through the exact read-only command', async () => {
@@ -206,6 +276,73 @@ describe('Google host broker', () => {
     expect(argv).toContain('--sanitize-content');
     expect(argv).toContain('--readonly');
     expect(argv).toContain('gmail.thread.get');
+    expect(argv).not.toContain('--download');
+  });
+
+  it('extracts only canonical Google Workspace links from raw email data', async () => {
+    const google = await import('./google-workspace.js');
+    const output = google.extractGoogleWorkspaceLinks(
+      JSON.stringify({
+        body: `
+          <a href="https://drive.google.com/drive/folders/folder_0123456789?usp=sharing">folder</a>
+          <a href="https://docs.google.com/document/d/document_0123456789/edit?tab=t.0&amp;usp=sharing">doc</a>
+          <a href="https://docs.google.com/forms/d/e/form_0123456789/viewform">form</a>
+          https://evil.example/steal
+          https://docs.google.com.evil.example/document/d/fake_0123456789/edit
+        `,
+        nested: {
+          duplicate:
+            'https://docs.google.com/document/d/document_0123456789/edit',
+        },
+      }),
+    );
+
+    expect(JSON.parse(output)).toEqual({
+      links: [
+        {
+          kind: 'folder',
+          id: 'folder_0123456789',
+          url: 'https://drive.google.com/drive/folders/folder_0123456789',
+        },
+        {
+          kind: 'document',
+          id: 'document_0123456789',
+          url: 'https://docs.google.com/document/d/document_0123456789',
+        },
+        {
+          kind: 'form',
+          id: 'form_0123456789',
+          url: 'https://docs.google.com/forms/d/e/form_0123456789',
+        },
+      ],
+    });
+    expect(output).not.toContain('evil.example');
+  });
+
+  it('extracts Workspace links on the host without disabling read-only mode', async () => {
+    writePolicy(installFakeGog());
+    const google = await import('./google-workspace.js');
+
+    await google.googleGmailWorkspaceLinks(
+      { gmail: 'work_mail', threadId: '18abcdef0123456' },
+      'main',
+    );
+
+    const argv = JSON.parse(
+      fs.readFileSync(process.env.GOG_ARGS_LOG!, 'utf8').trim(),
+    ) as string[];
+    expect(argv.slice(0, 4)).toEqual([
+      'gmail',
+      'thread',
+      'get',
+      '18abcdef0123456',
+    ]);
+    expect(argv).toContain('--full');
+    expect(argv).toContain('--readonly');
+    expect(argv).toContain('--wrap-untrusted');
+    expect(argv).toContain('--gmail-no-send');
+    expect(argv).toContain('gmail.thread.get');
+    expect(argv).not.toContain('--sanitize-content');
     expect(argv).not.toContain('--download');
   });
 

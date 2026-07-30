@@ -42,10 +42,13 @@ import { transcribeAudioDetailed } from './transcription.js';
 import {
   googleCalendarList,
   googleDocsRead,
+  googleDriveListFolder,
+  googleDriveSearch,
   googleGmailMessageRead,
   googleGmailRecentDrafts,
   googleGmailSearch,
   googleGmailThreadRead,
+  googleGmailWorkspaceLinks,
   proposeGoogleWrite,
   type GoogleActionContext,
 } from './google-workspace.js';
@@ -444,6 +447,12 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
   googleDocsRead: async (params, ctx) =>
     googleDocsRead(params || {}, googleContext(ctx).sourceGroup),
 
+  googleDriveSearch: async (params, ctx) =>
+    googleDriveSearch(params || {}, googleContext(ctx).sourceGroup),
+
+  googleDriveListFolder: async (params, ctx) =>
+    googleDriveListFolder(params || {}, googleContext(ctx).sourceGroup),
+
   googleGmailSearch: async (params, ctx) =>
     googleGmailSearch(params || {}, googleContext(ctx).sourceGroup),
 
@@ -455,6 +464,9 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
 
   googleGmailThreadRead: async (params, ctx) =>
     googleGmailThreadRead(params || {}, googleContext(ctx).sourceGroup),
+
+  googleGmailWorkspaceLinks: async (params, ctx) =>
+    googleGmailWorkspaceLinks(params || {}, googleContext(ctx).sourceGroup),
 
   googleCalendarProposeCreate: async (params, ctx) =>
     proposeGoogleWrite('calendar.create', params || {}, googleContext(ctx)),
