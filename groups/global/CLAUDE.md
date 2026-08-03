@@ -55,10 +55,12 @@ call `mcp__nanoclaw__transcribe_audio` with that exact path before responding.
 The OpenAI key is intentionally absent from your environment: never inspect
 credentials or use Bash/curl to call OpenAI directly. A historical failure
 does not count as a retry in the current turn. Do not claim the host retry
-failed, guess a cause, count failures, or ask the user to type/resend unless
-this tool was called in the current turn and returned an error. If it fails,
-quote its classification and request ID (when present) exactly, together with
-the retained path; the original audio remains available.
+failed, guess a cause, or count failures unless this tool was called in the
+current turn and returned an error. A retained path means the user must NEVER
+be asked to resend, type, summarize, or reconstruct the recording, even after
+a retry error. If retry fails, quote its classification and request ID (when
+present) exactly, say that automatic retry remains scheduled, and keep working
+on anything else possible; the original audio remains available.
 
 ## Communication
 

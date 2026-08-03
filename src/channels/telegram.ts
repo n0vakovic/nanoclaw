@@ -10,9 +10,14 @@ import {
   TELEGRAM_API_TIMEOUT_MS,
   TELEGRAM_HANDLER_TIMEOUT_MS,
   TELEGRAM_MEDIA_TIMEOUT_MS,
+  RETAINED_TRANSCRIPTION_TIMEOUT_MS,
+  RETAINED_VOICE_RETRY_DELAYS_MS,
 } from '../config.js';
 import { readEnvFile } from '../env.js';
-import { resolveGroupIpcPath } from '../group-folder.js';
+import {
+  resolveGroupFolderPath,
+  resolveGroupIpcPath,
+} from '../group-folder.js';
 import { logger } from '../logger.js';
 import {
   transcribeAudioDetailed,
@@ -152,6 +157,7 @@ export class TelegramChannel implements Channel {
   private opts: TelegramChannelOpts;
   private botToken: string;
   private reactionMsgIds = new Map<string, number>();
+  private voiceRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   private async setReaction(jid: string, emoji: string): Promise<void> {
     if (!this.bot) return;
@@ -186,6 +192,8 @@ export class TelegramChannel implements Channel {
     fileUniqueId?: string;
     duration?: number;
     mimeType?: string;
+    sender?: string;
+    senderName?: string;
     source: 'message' | 'reply';
   }): Promise<RetainedTelegramVoice> {
     const safeMessageId = String(opts.messageId).replace(
@@ -204,6 +212,9 @@ export class TelegramChannel implements Channel {
       recovery_source: opts.source,
       status: 'download_pending',
       chat_jid: opts.chatJid,
+      group_folder: opts.groupFolder,
+      sender: opts.sender || null,
+      sender_name: opts.senderName || null,
       telegram_message_id: String(opts.messageId),
       telegram_file_id: opts.fileId,
       telegram_file_unique_id: opts.fileUniqueId || null,
@@ -288,6 +299,245 @@ export class TelegramChannel implements Channel {
     );
   }
 
+  private scheduleRetainedVoiceRetry(
+    retained: RetainedTelegramVoice,
+    preserveCurrentStatus = false,
+  ): void {
+    if (!retained.hostAudioPath || !retained.containerAudioPath) return;
+    if (this.voiceRetryTimers.has(retained.hostAudioPath)) return;
+
+    const retryCount =
+      typeof retained.metadata.retry_count === 'number'
+        ? retained.metadata.retry_count
+        : 0;
+    const delays =
+      RETAINED_VOICE_RETRY_DELAYS_MS.length > 0
+        ? RETAINED_VOICE_RETRY_DELAYS_MS
+        : [30_000];
+    const delayMs = delays[Math.min(retryCount, delays.length - 1)];
+    if (!preserveCurrentStatus) {
+      this.updateRetainedVoice(retained, {
+        status: 'retry_scheduled',
+        retry_count: retryCount,
+        next_retry_at: new Date(Date.now() + delayMs).toISOString(),
+      });
+    }
+
+    const timer = setTimeout(() => {
+      this.voiceRetryTimers.delete(retained.hostAudioPath!);
+      void this.retryRetainedVoice(retained);
+    }, delayMs);
+    timer.unref?.();
+    this.voiceRetryTimers.set(retained.hostAudioPath, timer);
+    logger.info(
+      {
+        audioPath: retained.containerAudioPath,
+        retryCount,
+        delayMs,
+      },
+      'Scheduled retained Telegram voice transcription retry',
+    );
+  }
+
+  private persistRecoveredTranscript(
+    retained: RetainedTelegramVoice,
+    transcript: string,
+  ): string | undefined {
+    const groupFolder = retained.metadata.group_folder;
+    const messageId = retained.metadata.telegram_message_id;
+    if (typeof groupFolder !== 'string' || typeof messageId !== 'string') {
+      return undefined;
+    }
+    const safeMessageId = messageId.replace(/[^A-Za-z0-9_-]/g, '_');
+    const outputDir = path.join(
+      resolveGroupFolderPath(groupFolder),
+      'recovered-voice',
+    );
+    fs.mkdirSync(outputDir, { recursive: true, mode: 0o700 });
+    const filename = `voice_${safeMessageId}.txt`;
+    fs.writeFileSync(path.join(outputDir, filename), transcript + '\n', {
+      mode: 0o600,
+    });
+    return `/workspace/group/recovered-voice/${filename}`;
+  }
+
+  private async retryRetainedVoice(
+    retained: RetainedTelegramVoice,
+  ): Promise<void> {
+    if (!retained.hostAudioPath || !retained.filename) return;
+    if (!fs.existsSync(retained.hostAudioPath)) {
+      this.updateRetainedVoice(retained, {
+        status: 'retained_audio_missing',
+        retry_stopped_at: new Date().toISOString(),
+      });
+      return;
+    }
+
+    try {
+      if (fs.existsSync(retained.hostMetadataPath)) {
+        const current = JSON.parse(
+          fs.readFileSync(retained.hostMetadataPath, 'utf8'),
+        ) as Record<string, unknown>;
+        Object.assign(retained.metadata, current);
+        if (String(current.status).startsWith('transcribed')) return;
+        if (current.status === 'manual_retry_in_progress') {
+          this.scheduleRetainedVoiceRetry(retained, true);
+          return;
+        }
+      }
+
+      const retryCount =
+        (typeof retained.metadata.retry_count === 'number'
+          ? retained.metadata.retry_count
+          : 0) + 1;
+      this.updateRetainedVoice(retained, {
+        status: 'retry_in_progress',
+        retry_count: retryCount,
+        last_retry_at: new Date().toISOString(),
+        next_retry_at: null,
+      });
+      const outcome = await transcribeAudioDetailed(
+        fs.readFileSync(retained.hostAudioPath),
+        retained.filename,
+        {
+          timeoutMs: RETAINED_TRANSCRIPTION_TIMEOUT_MS,
+          enablePlainFallback: false,
+          primaryMode: 'gpt4o_plain_json',
+          context: 'automatic_retained_retry',
+          audioDurationSeconds:
+            typeof retained.metadata.duration_seconds === 'number'
+              ? retained.metadata.duration_seconds
+              : undefined,
+        },
+      );
+
+      if (!outcome.transcript) {
+        this.updateRetainedVoice(retained, {
+          status: 'transcription_failed',
+          transcription_diagnostic: outcome.diagnostic,
+          failed_at: new Date().toISOString(),
+        });
+        this.scheduleRetainedVoiceRetry(retained);
+        return;
+      }
+
+      const transcriptPath = this.persistRecoveredTranscript(
+        retained,
+        outcome.transcript,
+      );
+      const chatJid = retained.metadata.chat_jid;
+      const messageId = retained.metadata.telegram_message_id;
+      if (typeof chatJid !== 'string' || typeof messageId !== 'string') {
+        throw new Error('Retained voice metadata lacks chat/message identity');
+      }
+      this.opts.onMessage(chatJid, {
+        id: `voice-recovery-${messageId}-${Date.now()}`,
+        chat_jid: chatJid,
+        sender:
+          typeof retained.metadata.sender === 'string'
+            ? retained.metadata.sender
+            : 'telegram-voice-recovery',
+        sender_name:
+          typeof retained.metadata.sender_name === 'string'
+            ? retained.metadata.sender_name
+            : 'Recovered voice',
+        content: `${
+          transcriptPath
+            ? `[Automatically recovered retained voice ${messageId}; durable transcript: ${transcriptPath}]\n`
+            : `[Automatically recovered retained voice ${messageId}]\n`
+        }[Voice: ${outcome.transcript}]`,
+        timestamp: new Date().toISOString(),
+        is_from_me: false,
+      });
+      this.markRetainedVoiceTranscribed(
+        retained,
+        outcome.transcript.length,
+        outcome.diagnostic,
+      );
+      this.updateRetainedVoice(retained, {
+        status: 'transcribed_by_automatic_retry',
+        transcript_path: transcriptPath || null,
+        recovered_at: new Date().toISOString(),
+      });
+      logger.info(
+        {
+          chatJid,
+          messageId,
+          transcriptChars: outcome.transcript.length,
+          transcriptPath,
+        },
+        'Automatically recovered retained Telegram voice',
+      );
+    } catch (err) {
+      logger.error(
+        { err, audioPath: retained.containerAudioPath },
+        'Retained Telegram voice retry crashed; scheduling another attempt',
+      );
+      this.updateRetainedVoice(retained, {
+        status: 'retry_internal_error',
+        retry_error: err instanceof Error ? err.message : String(err),
+        failed_at: new Date().toISOString(),
+      });
+      this.scheduleRetainedVoiceRetry(retained);
+    }
+  }
+
+  private resumeRetainedVoiceRetries(): void {
+    for (const group of Object.values(this.opts.registeredGroups())) {
+      const mediaDir = path.join(resolveGroupIpcPath(group.folder), 'media');
+      if (!fs.existsSync(mediaDir)) continue;
+      let entries: string[];
+      try {
+        entries = fs.readdirSync(mediaDir);
+      } catch (err) {
+        logger.warn(
+          { err, mediaDir },
+          'Failed to scan retained Telegram voice retries',
+        );
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.endsWith('.json')) continue;
+        const hostMetadataPath = path.join(mediaDir, entry);
+        try {
+          const metadata = JSON.parse(
+            fs.readFileSync(hostMetadataPath, 'utf8'),
+          ) as Record<string, unknown>;
+          const status = String(metadata.status || '');
+          if (
+            status !== 'transcription_failed' &&
+            status !== 'retry_scheduled' &&
+            status !== 'retry_in_progress' &&
+            status !== 'retry_internal_error' &&
+            status !== 'manual_retry_in_progress'
+          ) {
+            continue;
+          }
+          if (typeof metadata.audio_path !== 'string') continue;
+          const filename = path.basename(metadata.audio_path);
+          const hostAudioPath = path.join(mediaDir, filename);
+          if (!fs.existsSync(hostAudioPath)) continue;
+          metadata.group_folder = group.folder;
+          const retained: RetainedTelegramVoice = {
+            buffer: null,
+            filename,
+            hostAudioPath,
+            containerAudioPath: metadata.audio_path,
+            hostMetadataPath,
+            containerMetadataPath: `/workspace/ipc/media/${entry}`,
+            metadata,
+          };
+          this.scheduleRetainedVoiceRetry(retained);
+        } catch (err) {
+          logger.warn(
+            { err, metadataPath: hostMetadataPath },
+            'Failed to resume retained Telegram voice retry',
+          );
+        }
+      }
+    }
+  }
+
   private markRetainedVoiceTranscribed(
     retained: RetainedTelegramVoice,
     transcriptLength: number,
@@ -340,6 +590,11 @@ export class TelegramChannel implements Channel {
       fileUniqueId: media.file_unique_id,
       duration: media.duration,
       mimeType: media.mime_type,
+      sender: replyTo?.from?.id?.toString(),
+      senderName:
+        replyTo?.from?.first_name ||
+        replyTo?.from?.username ||
+        replyTo?.from?.id?.toString(),
       source: 'reply',
     });
     if (!retained.buffer || !retained.filename) {
@@ -376,6 +631,7 @@ export class TelegramChannel implements Channel {
       transcription_diagnostic: outcome.diagnostic,
       failed_at: new Date().toISOString(),
     });
+    this.scheduleRetainedVoiceRetry(retained);
     return {
       transcript: null,
       audioPath: retained.containerAudioPath || undefined,
@@ -838,6 +1094,8 @@ export class TelegramChannel implements Channel {
         fileUniqueId: voice?.file_unique_id,
         duration: voice?.duration,
         mimeType: voice?.mime_type,
+        sender: ctx.from?.id?.toString(),
+        senderName,
         source: 'message',
       });
       if (retained.buffer && retained.filename) {
@@ -871,7 +1129,8 @@ export class TelegramChannel implements Channel {
             transcription_diagnostic: outcome.diagnostic,
             failed_at: new Date().toISOString(),
           });
-          content += `\n\nAudio retained at ${retained.containerAudioPath}. Recovery metadata: ${retained.containerMetadataPath}.`;
+          this.scheduleRetainedVoiceRetry(retained);
+          content += `\n\nAudio retained at ${retained.containerAudioPath}. Recovery metadata: ${retained.containerMetadataPath}. Automatic retry is scheduled; do not ask the user to resend or reconstruct it.`;
           logger.warn(
             {
               chatJid,
@@ -981,6 +1240,7 @@ export class TelegramChannel implements Channel {
           console.log(
             `  Send /chatid to the bot to get a chat's registration ID\n`,
           );
+          this.resumeRetainedVoiceRetries();
           resolve();
         },
       });
@@ -1121,6 +1381,8 @@ export class TelegramChannel implements Channel {
   }
 
   async disconnect(): Promise<void> {
+    for (const timer of this.voiceRetryTimers.values()) clearTimeout(timer);
+    this.voiceRetryTimers.clear();
     if (this.bot) {
       this.bot.stop();
       this.bot = null;

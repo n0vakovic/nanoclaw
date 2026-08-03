@@ -312,7 +312,19 @@ function classifyFailure(
   attempts: AttemptDiagnostic[],
   probe: { reachable: boolean },
 ): string {
-  if (!probe.reachable) return 'openai_connectivity_failed';
+  // The request trace is direct evidence; the connectivity probe is only a
+  // secondary observation taken after the failure. Never let a failed probe
+  // turn a local pre-upload stall into the claim that OpenAI was down.
+  if (
+    attempts.every(
+      (attempt) =>
+        attempt.transport.requestCreatedMs !== undefined &&
+        attempt.transport.bodySentMs === undefined &&
+        attempt.transport.responseHeadersMs === undefined,
+    )
+  ) {
+    return 'transcription_upload_stalled_before_body_sent';
+  }
   if (
     attempts.every(
       (attempt) =>
@@ -328,6 +340,9 @@ function classifyFailure(
     )
   ) {
     return 'transcription_api_error_response';
+  }
+  if (!probe.reachable) {
+    return 'transcription_transport_failure_probe_unreachable';
   }
   return 'transcription_transport_failure';
 }

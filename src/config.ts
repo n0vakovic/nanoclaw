@@ -41,9 +41,15 @@ export const TRANSCRIPTION_FALLBACK_TIMEOUT_MS = parseInt(
   10,
 ); // Plain JSON fallback on a different transcription model
 export const RETAINED_TRANSCRIPTION_TIMEOUT_MS = parseInt(
-  process.env.RETAINED_TRANSCRIPTION_TIMEOUT_MS || '45000',
+  process.env.RETAINED_TRANSCRIPTION_TIMEOUT_MS || '120000',
   10,
-); // Explicit host-side retry; still bounded for interactive use
+); // Retained-file retry; longer than the inline path because no Telegram handler is blocked
+export const RETAINED_VOICE_RETRY_DELAYS_MS = (
+  process.env.RETAINED_VOICE_RETRY_DELAYS_MS || '30000,120000,600000,1800000'
+)
+  .split(',')
+  .map((value) => parseInt(value.trim(), 10))
+  .filter((value) => Number.isFinite(value) && value >= 0);
 export const TELEGRAM_API_TIMEOUT_MS = parseInt(
   process.env.TELEGRAM_API_TIMEOUT_MS || '30000',
   10,

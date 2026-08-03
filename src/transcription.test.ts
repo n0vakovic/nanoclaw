@@ -78,6 +78,26 @@ function timedOutResponse() {
   };
 }
 
+function uploadStalledResponse() {
+  return {
+    withResponse: async () => {
+      channel('undici:request:create').publish({
+        request: diagnosticRequest,
+      });
+      channel('undici:request:error').publish({
+        request: diagnosticRequest,
+        error: Object.assign(new Error('The operation was aborted'), {
+          name: 'AbortError',
+          code: 'ABORT_ERR',
+        }),
+      });
+      throw Object.assign(new Error('Request timed out.'), {
+        name: 'APIConnectionTimeoutError',
+      });
+    },
+  };
+}
+
 beforeEach(() => {
   createMock.mockReset();
   vi.unstubAllGlobals();
@@ -184,6 +204,40 @@ describe('transcription diagnostics and fallback', () => {
         name: 'AbortError',
         code: 'ABORT_ERR',
       });
+    }
+  });
+
+  it('classifies a pre-upload stall from request phases even when the later probe fails', async () => {
+    createMock
+      .mockReturnValueOnce(uploadStalledResponse())
+      .mockReturnValueOnce(uploadStalledResponse());
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockRejectedValue(
+        Object.assign(new Error('probe timed out'), {
+          name: 'TimeoutError',
+          code: 23,
+        }),
+      ),
+    );
+
+    const outcome = await transcribeAudioDetailed(
+      Buffer.from('audio'),
+      'voice.oga',
+      { context: 'test' },
+    );
+
+    expect(outcome.transcript).toBeNull();
+    expect(outcome.diagnostic.classification).toBe(
+      'transcription_upload_stalled_before_body_sent',
+    );
+    expect(outcome.diagnostic.connectivityProbe).toMatchObject({
+      reachable: false,
+    });
+    for (const attempt of outcome.diagnostic.attempts) {
+      expect(attempt.transport.requestCreatedMs).toBeDefined();
+      expect(attempt.transport.bodySentMs).toBeUndefined();
+      expect(attempt.transport.responseHeadersMs).toBeUndefined();
     }
   });
 });

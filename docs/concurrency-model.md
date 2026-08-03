@@ -46,7 +46,8 @@ is still stored, rather than the whole handler being abandoned.
 | Per-fetch timeout (`fetchWithTimeout`)                      | media downloads in `telegram.ts`; every `fetch` in `host-actions.ts` | `TELEGRAM_MEDIA_TIMEOUT_MS` = 15s / `HOST_ACTION_FETCH_TIMEOUT_MS` = 30s | graceful degradation — a stalled download rejects into its catch and the message stores with fallback text                            |
 | Automatic word-timestamp attempt                            | `transcription.ts` (`whisper-1`, verbose JSON)                       | `TRANSCRIPTION_TIMEOUT_MS` = 30s                                         | preserves pause markers when the word-timestamp path is healthy                                                                       |
 | Automatic plain-text fallback                               | `transcription.ts` (`gpt-4o-mini-transcribe`, JSON)                  | `TRANSCRIPTION_FALLBACK_TIMEOUT_MS` = 30s                                | uses a different model/request shape when word timestamps stall; both attempts fit inside the handler budget                          |
-| Retained-audio retry                                        | `host-actions.ts` (`gpt-4o-mini-transcribe`, JSON)                   | `RETAINED_TRANSCRIPTION_TIMEOUT_MS` = 45s                                | a final host-side retry remains interactive instead of blocking silently for several minutes                                          |
+| Retained-audio retry                                        | `host-actions.ts` and automatic retry in `telegram.ts`               | `RETAINED_TRANSCRIPTION_TIMEOUT_MS` = 120s                               | gives the simpler plain-transcription request room to recover without blocking Telegram's inbound handler                             |
+| Durable retained-audio backoff                              | `telegram.ts`                                                        | `RETAINED_VOICE_RETRY_DELAYS_MS` = 30s, 2m, 10m, 30m (then 30m)          | retries indefinitely, resumes from metadata after restart, and injects a recovered transcript back into the original conversation     |
 | Inbound handler backstop (`createHandlerTimeoutMiddleware`) | first `bot.use()` in `telegram.ts`                                   | `TELEGRAM_HANDLER_TIMEOUT_MS` = 90s                                      | grammy's poll loop — no single update can block it longer than the budget; on timeout the handler is abandoned and the loop continues |
 | Outbound API backstop (`createApiTimeoutTransformer`)       | `bot.api.config.use()` in `telegram.ts`                              | `TELEGRAM_API_TIMEOUT_MS` = 30s                                          | every `bot.api.*` send — a stalled send can't freeze the IPC watcher or the container output chain                                    |
 
@@ -57,12 +58,21 @@ grammy guards in `src/bot-guards.ts`. Both are unit-tested in isolation, and
 Every transcription attempt logs an audio SHA-256, byte count, reported audio
 duration, model/request mode, timeout, elapsed time, OpenAI request ID when one
 exists, and undici transport phases (`request:create`, `bodySent`, response
-headers, transport error). If both automatic attempts fail, a credential-free
-OpenAI edge probe distinguishes general DNS/TCP/TLS reachability from a
-transcription request that uploaded successfully but never received response
-headers. The same structured diagnostic is stored in the retained voice
-metadata JSON, so evidence survives log rotation and remains coupled to the
-exact audio by SHA-256.
+headers, transport error). Direct request phases take precedence in failure
+classification: a request that was created but never emitted `bodySent` is
+reported as `transcription_upload_stalled_before_body_sent`, even if a later
+credential-free connectivity probe also times out. This prevents a secondary
+probe from becoming the false claim that OpenAI was down. The same structured
+diagnostic is stored in the retained voice metadata JSON, so evidence survives
+log rotation and remains coupled to the exact audio by SHA-256.
+
+Failed Telegram transcriptions keep the audio plus retry state in the group IPC
+media directory. Automatic retries use the plain transcription model, persist a
+successful transcript under the group's `recovered-voice/` directory, and store
+it as a new inbound recovery message so the agent receives the content without
+the user resending or reconstructing it. Startup scans persisted retry metadata
+and resumes any interrupted backoff. Explicit agent retries mark the metadata as
+`manual_retry_in_progress`, preventing overlap with the automatic worker.
 
 Telegram's `.oga` filename suffix is normalized to `.ogg` only for the OpenAI
 multipart upload. The retained filename and bytes are unchanged. OpenAI rejects

@@ -834,6 +834,10 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
       );
     }
 
+    patchTranscriptionMetadata(hostAudioPath, {
+      status: 'manual_retry_in_progress',
+      manual_retry_started_at: new Date().toISOString(),
+    });
     const outcome = await transcribeAudioDetailed(
       fs.readFileSync(hostAudioPath),
       path.basename(hostAudioPath),
@@ -847,12 +851,22 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
     );
     const transcript = outcome.transcript;
     if (!transcript) {
+      patchTranscriptionMetadata(hostAudioPath, {
+        status: 'transcription_failed',
+        transcription_diagnostic: outcome.diagnostic,
+        manual_retry_failed_at: new Date().toISOString(),
+      });
       throw new Error(
         `transcribeAudio: ${outcome.diagnostic.classification}; retained audio was not deleted; diagnostic=${JSON.stringify(outcome.diagnostic)}`,
       );
     }
 
-    updateTranscriptionMetadata(hostAudioPath, transcript.length);
+    patchTranscriptionMetadata(hostAudioPath, {
+      status: 'transcribed_by_host_action',
+      transcript_chars: transcript.length,
+      transcription_diagnostic: outcome.diagnostic,
+      transcribed_at: new Date().toISOString(),
+    });
     logger.info(
       {
         sourceGroup: ctx.sourceGroup,
@@ -1659,9 +1673,9 @@ function resolveTranscriptionAudioPath(
   return realPath;
 }
 
-function updateTranscriptionMetadata(
+function patchTranscriptionMetadata(
   hostAudioPath: string,
-  transcriptChars: number,
+  patch: Record<string, unknown>,
 ): void {
   const metadataPath = hostAudioPath.replace(/\.[^.]+$/, '.json');
   if (!fs.existsSync(metadataPath)) return;
@@ -1675,9 +1689,7 @@ function updateTranscriptionMetadata(
       JSON.stringify(
         {
           ...metadata,
-          status: 'transcribed_by_host_action',
-          transcript_chars: transcriptChars,
-          transcribed_at: new Date().toISOString(),
+          ...patch,
         },
         null,
         2,
@@ -1686,7 +1698,7 @@ function updateTranscriptionMetadata(
   } catch (err) {
     logger.warn(
       { err, metadataPath },
-      'Failed to update retained audio transcription metadata',
+      'Failed to patch retained audio transcription metadata',
     );
   }
 }

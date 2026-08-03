@@ -6,6 +6,9 @@ const fsMock = vi.hoisted(() => ({
   mkdirSync: vi.fn(),
   writeFileSync: vi.fn(),
   unlinkSync: vi.fn(),
+  existsSync: vi.fn(() => false),
+  readdirSync: vi.fn(() => [] as string[]),
+  readFileSync: vi.fn(),
 }));
 vi.mock('fs', () => ({ default: fsMock }));
 
@@ -24,6 +27,8 @@ vi.mock('../config.js', () => ({
   TELEGRAM_API_TIMEOUT_MS: 30000,
   TELEGRAM_HANDLER_TIMEOUT_MS: 90000,
   TELEGRAM_MEDIA_TIMEOUT_MS: 15000,
+  RETAINED_TRANSCRIPTION_TIMEOUT_MS: 120000,
+  RETAINED_VOICE_RETRY_DELAYS_MS: [10],
   TRANSCRIPTION_TIMEOUT_MS: 45000,
 }));
 
@@ -231,6 +236,8 @@ async function triggerMediaMessage(
 describe('TelegramChannel', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    fsMock.existsSync.mockReturnValue(false);
+    fsMock.readdirSync.mockReturnValue([]);
     transcribeAudioMock.mockResolvedValue(null);
     vi.stubGlobal(
       'fetch',
@@ -245,6 +252,7 @@ describe('TelegramChannel', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -325,6 +333,47 @@ describe('TelegramChannel', () => {
       const channel = new TelegramChannel('test-token', opts);
 
       expect(channel.isConnected()).toBe(false);
+    });
+
+    it('resumes a persisted retained-voice retry after restart', async () => {
+      vi.useFakeTimers();
+      fsMock.existsSync.mockReturnValue(true);
+      fsMock.readdirSync.mockReturnValue(['voice_80.json']);
+      fsMock.readFileSync.mockImplementation((filePath: unknown) =>
+        String(filePath).endsWith('.json')
+          ? JSON.stringify({
+              status: 'retry_scheduled',
+              retry_count: 0,
+              chat_jid: 'tg:100200300',
+              telegram_message_id: '80',
+              sender: '42',
+              sender_name: 'Milan',
+              audio_path: '/workspace/ipc/media/voice_80.ogg',
+              duration_seconds: 4,
+            })
+          : Buffer.from('persisted audio bytes'),
+      );
+      transcribeAudioMock.mockResolvedValue('restart recovery transcript');
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+
+      await channel.connect();
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(transcribeAudioMock).toHaveBeenCalledWith(
+        Buffer.from('persisted audio bytes'),
+        'voice_80.ogg',
+        expect.objectContaining({ context: 'automatic_retained_retry' }),
+      );
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({
+          content: expect.stringContaining(
+            '[Voice: restart recovery transcript]',
+          ),
+        }),
+      );
+      await channel.disconnect();
     });
   });
 
@@ -777,6 +826,113 @@ describe('TelegramChannel', () => {
           '"classification": "transcription_backend_no_response_after_upload"',
         ),
       );
+      expect(fsMock.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('voice_77.json'),
+        expect.stringContaining('"status": "retry_scheduled"'),
+      );
+    });
+
+    it('automatically retries retained voice and injects the transcript', async () => {
+      vi.useFakeTimers();
+      transcribeAudioMock
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce('automatic recovery transcript');
+      fsMock.existsSync.mockReturnValue(true);
+      fsMock.readFileSync.mockImplementation((filePath: unknown) =>
+        String(filePath).endsWith('.json')
+          ? JSON.stringify({
+              status: 'retry_scheduled',
+              retry_count: 0,
+              group_folder: 'test-group',
+              chat_jid: 'tg:100200300',
+              telegram_message_id: '79',
+              sender: '42',
+              sender_name: 'Milan',
+              audio_path: '/workspace/ipc/media/voice_79.ogg',
+              duration_seconds: 5,
+            })
+          : Buffer.from('audio bytes'),
+      );
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createMediaCtx({
+        messageId: 79,
+        extra: {
+          voice: {
+            file_id: 'telegram-file-79',
+            file_unique_id: 'unique-79',
+            duration: 5,
+            mime_type: 'audio/ogg',
+          },
+        },
+      });
+      await triggerMediaMessage('message:voice', ctx);
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(transcribeAudioMock).toHaveBeenCalledTimes(2);
+      expect(transcribeAudioMock).toHaveBeenLastCalledWith(
+        Buffer.from('audio bytes'),
+        'voice_79.ogg',
+        expect.objectContaining({
+          timeoutMs: 120000,
+          enablePlainFallback: false,
+          primaryMode: 'gpt4o_plain_json',
+          context: 'automatic_retained_retry',
+        }),
+      );
+      expect(opts.onMessage).toHaveBeenLastCalledWith(
+        'tg:100200300',
+        expect.objectContaining({
+          content: expect.stringContaining(
+            '[Voice: automatic recovery transcript]',
+          ),
+        }),
+      );
+      expect(fsMock.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('recovered-voice/voice_79.txt'),
+        'automatic recovery transcript\n',
+        { mode: 0o600 },
+      );
+      await channel.disconnect();
+    });
+
+    it('does not overlap an explicit host retry already in progress', async () => {
+      vi.useFakeTimers();
+      transcribeAudioMock.mockResolvedValue(null);
+      fsMock.existsSync.mockReturnValue(true);
+      fsMock.readFileSync.mockImplementation((filePath: unknown) =>
+        String(filePath).endsWith('.json')
+          ? JSON.stringify({
+              status: 'manual_retry_in_progress',
+              retry_count: 0,
+              group_folder: 'test-group',
+              chat_jid: 'tg:100200300',
+              telegram_message_id: '81',
+              audio_path: '/workspace/ipc/media/voice_81.ogg',
+            })
+          : Buffer.from('audio bytes'),
+      );
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+      const ctx = createMediaCtx({
+        messageId: 81,
+        extra: {
+          voice: {
+            file_id: 'telegram-file-81',
+            duration: 5,
+            mime_type: 'audio/ogg',
+          },
+        },
+      });
+
+      await triggerMediaMessage('message:voice', ctx);
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(transcribeAudioMock).toHaveBeenCalledTimes(1);
+      await channel.disconnect();
     });
 
     it('removes retained audio after successful transcription', async () => {

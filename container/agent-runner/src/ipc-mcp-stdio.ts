@@ -209,7 +209,7 @@ server.tool(
 
 server.tool(
   'transcribe_audio',
-  'Transcribe a retained voice/audio attachment through a host-side action. Use whenever an incoming message says audio was retained at /workspace/ipc/media/... because automatic transcription failed. The host keeps the OpenAI credential private: never inspect credentials or call OpenAI with Bash/curl. Historical failures do not count as a retry. Do not claim this action failed, guess a cause, count failures, or ask the user to type/resend unless you called this tool in the current turn and quote its returned diagnostic.',
+  'Transcribe a retained voice/audio attachment through a host-side action. Use whenever an incoming message says audio was retained at /workspace/ipc/media/... because automatic transcription failed. The host keeps the OpenAI credential private: never inspect credentials or call OpenAI with Bash/curl. Historical failures do not count as a retry. A retained file is already recoverable: never ask the user to resend, type, summarize, or reconstruct it, even if this retry fails. Quote the returned classification/request details and say automatic retry remains scheduled.',
   {
     audioPath: z
       .string()
@@ -222,7 +222,7 @@ server.tool(
       const output = await requestHostAction(
         'transcribeAudio',
         { audioPath: args.audioPath },
-        60_000,
+        135_000,
       );
       const result = JSON.parse(output) as {
         transcript?: string;
