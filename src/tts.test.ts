@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const loggerMock = vi.hoisted(() => ({
   info: vi.fn(),
+  warn: vi.fn(),
   error: vi.fn(),
 }));
 
@@ -78,6 +79,11 @@ describe('ElevenLabs TTS diagnostics', () => {
     expect(outcome.diagnostic.transport.bodySentMs).toBeDefined();
     expect(outcome.diagnostic.transport.responseHeadersMs).toBeDefined();
     expect(outcome.diagnostic.transport.responseBodyMs).toBeDefined();
+    expect(outcome.diagnostic.dispatcher).toMatchObject({
+      strategy: 'disposable_per_attempt',
+      destroyStartedMs: expect.any(Number),
+      destroyCompletedMs: expect.any(Number),
+    });
   });
 
   it('classifies a stall before the request body was sent', async () => {
@@ -106,6 +112,13 @@ describe('ElevenLabs TTS diagnostics', () => {
       name: 'TimeoutError',
       code: 23,
     });
+    expect(outcome.diagnostic.attempts).toHaveLength(2);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    const firstDispatcher = vi.mocked(fetch).mock.calls[0][1]?.dispatcher;
+    const retryDispatcher = vi.mocked(fetch).mock.calls[1][1]?.dispatcher;
+    expect(firstDispatcher).toBeDefined();
+    expect(retryDispatcher).toBeDefined();
+    expect(retryDispatcher).not.toBe(firstDispatcher);
   });
 
   it('classifies no response after a completed upload', async () => {
@@ -123,6 +136,37 @@ describe('ElevenLabs TTS diagnostics', () => {
     expect(outcome.audio).toBeNull();
     expect(outcome.diagnostic.classification).toBe(
       'tts_backend_no_response_after_upload',
+    );
+    expect(outcome.diagnostic.attempts).toHaveLength(2);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('recovers one transport failure over a fresh dispatcher', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockImplementationOnce(async () => {
+          const error = new Error('timed out');
+          publishRequestPhases({ bodySent: true, error });
+          throw error;
+        })
+        .mockImplementationOnce(async () => {
+          publishRequestPhases({ bodySent: true, headers: 200 });
+          return new Response(Buffer.from('recovered mp3'), { status: 200 });
+        }),
+    );
+
+    const outcome = await synthesizeSpeechDetailed(baseOptions);
+
+    expect(outcome.audio).toEqual(Buffer.from('recovered mp3'));
+    expect(outcome.diagnostic.classification).toBe(
+      'tts_fresh_connection_retry_succeeded',
+    );
+    expect(outcome.diagnostic.attempts).toHaveLength(2);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(fetch).mock.calls[1][1]?.dispatcher).not.toBe(
+      vi.mocked(fetch).mock.calls[0][1]?.dispatcher,
     );
   });
 
@@ -147,5 +191,7 @@ describe('ElevenLabs TTS diagnostics', () => {
       requestId: 'eleven-request-429',
       transport: { responseStatus: 429 },
     });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(outcome.diagnostic.attempts).toBeUndefined();
   });
 });

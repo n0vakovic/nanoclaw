@@ -43,7 +43,7 @@ export function withTimeout<T>(
 export function fetchWithTimeout(
   url: string,
   ms: number,
-  init?: RequestInit,
+  init?: RequestInit & { dispatcher?: import('undici').Dispatcher },
 ): Promise<Response> {
   return fetch(url, { ...init, signal: AbortSignal.timeout(ms) });
 }

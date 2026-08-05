@@ -4,6 +4,10 @@ import { channel } from 'node:diagnostics_channel';
 
 import { logger } from './logger.js';
 import { fetchWithTimeout } from './timeout.js';
+import {
+  createDisposableDispatcher,
+  type DispatcherLifecycleTrace,
+} from './disposable-dispatcher.js';
 
 const ELEVENLABS_ORIGIN = 'https://api.elevenlabs.io';
 const ELEVENLABS_TTS_PATH = '/v1/text-to-speech/';
@@ -25,7 +29,7 @@ type UndiciDiagnosticMessage = {
   error?: unknown;
 };
 
-export type TtsDiagnostic = {
+export type TtsAttemptDiagnostic = {
   attemptId: string;
   voiceId: string;
   modelId: string;
@@ -35,7 +39,12 @@ export type TtsDiagnostic = {
   classification: string;
   requestId?: string | null;
   transport: Omit<TransportTrace, 'startedAtMs'>;
+  dispatcher: DispatcherLifecycleTrace;
   error?: Record<string, unknown>;
+};
+
+export type TtsDiagnostic = TtsAttemptDiagnostic & {
+  attempts?: TtsAttemptDiagnostic[];
 };
 
 export type TtsOutcome = {
@@ -141,7 +150,7 @@ function classifyFailure(trace: TransportTrace, responseStatus?: number) {
   return 'tts_transport_failure';
 }
 
-export async function synthesizeSpeechDetailed(options: {
+async function runSynthesisAttempt(options: {
   apiKey: string;
   text: string;
   voiceId: string;
@@ -153,6 +162,7 @@ export async function synthesizeSpeechDetailed(options: {
   const attemptId = randomUUID();
   const startedAtMs = Date.now();
   const trace: TransportTrace = { startedAtMs };
+  const disposable = createDisposableDispatcher(startedAtMs);
   const common = {
     ...options.context,
     attemptId,
@@ -179,6 +189,7 @@ export async function synthesizeSpeechDetailed(options: {
             model_id: modelId,
             voice_settings: { stability: 0.5, similarity_boost: 0.75 },
           }),
+          dispatcher: disposable.dispatcher,
         },
       ),
     );
@@ -191,12 +202,14 @@ export async function synthesizeSpeechDetailed(options: {
     if (!response.ok) {
       const responseBody = await response.text();
       trace.responseBodyMs = elapsed(trace);
-      const diagnostic: TtsDiagnostic = {
+      await disposable.destroy();
+      const diagnostic: TtsAttemptDiagnostic = {
         ...common,
         elapsedMs: elapsed(trace),
         classification: 'tts_api_error_response',
         requestId,
         transport: publicTransportTrace(trace),
+        dispatcher: disposable.trace,
       };
       logger.error(
         { ...options.context, ...diagnostic },
@@ -207,12 +220,14 @@ export async function synthesizeSpeechDetailed(options: {
 
     const audio = Buffer.from(await response.arrayBuffer());
     trace.responseBodyMs = elapsed(trace);
-    const diagnostic: TtsDiagnostic = {
+    await disposable.destroy();
+    const diagnostic: TtsAttemptDiagnostic = {
       ...common,
       elapsedMs: elapsed(trace),
       classification: audio.length > 0 ? 'tts_succeeded' : 'tts_empty_response',
       requestId,
       transport: publicTransportTrace(trace),
+      dispatcher: disposable.trace,
     };
     if (audio.length === 0) {
       logger.error(
@@ -227,11 +242,14 @@ export async function synthesizeSpeechDetailed(options: {
     );
     return { audio, diagnostic };
   } catch (error) {
-    const diagnostic: TtsDiagnostic = {
+    await disposable.captureFailureSnapshot();
+    await disposable.destroy();
+    const diagnostic: TtsAttemptDiagnostic = {
       ...common,
       elapsedMs: elapsed(trace),
       classification: classifyFailure(trace, trace.responseStatus),
       transport: publicTransportTrace(trace),
+      dispatcher: disposable.trace,
       error: describeError(error),
     };
     logger.error(
@@ -240,4 +258,51 @@ export async function synthesizeSpeechDetailed(options: {
     );
     return { audio: null, diagnostic };
   }
+}
+
+function isRetryableTransportFailure(
+  diagnostic: TtsAttemptDiagnostic,
+): boolean {
+  return (
+    diagnostic.classification !== 'tts_api_error_response' &&
+    diagnostic.error !== undefined
+  );
+}
+
+export async function synthesizeSpeechDetailed(options: {
+  apiKey: string;
+  text: string;
+  voiceId: string;
+  modelId: string;
+  timeoutMs: number;
+  context?: Record<string, unknown>;
+}): Promise<TtsOutcome> {
+  const primary = await runSynthesisAttempt(options);
+  if (primary.audio || !isRetryableTransportFailure(primary.diagnostic)) {
+    return primary;
+  }
+
+  logger.warn(
+    {
+      ...options.context,
+      failedAttemptId: primary.diagnostic.attemptId,
+      failedClassification: primary.diagnostic.classification,
+    },
+    'ElevenLabs TTS transport failed; retrying with a fresh connection',
+  );
+  const retry = await runSynthesisAttempt(options);
+  const diagnostic: TtsDiagnostic = {
+    ...retry.diagnostic,
+    classification: retry.audio
+      ? 'tts_fresh_connection_retry_succeeded'
+      : retry.diagnostic.classification,
+    attempts: [primary.diagnostic, retry.diagnostic],
+  };
+  if (retry.audio) {
+    logger.warn(
+      { ...options.context, ...diagnostic },
+      'Fresh connection recovered failed ElevenLabs TTS request',
+    );
+  }
+  return { ...retry, diagnostic };
 }

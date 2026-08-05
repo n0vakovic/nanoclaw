@@ -3,9 +3,13 @@ import { channel } from 'node:diagnostics_channel';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const createMock = vi.hoisted(() => vi.fn());
+const openAIConstructorMock = vi.hoisted(() => vi.fn());
 
 vi.mock('openai', () => ({
   default: class OpenAIMock {
+    constructor(options: unknown) {
+      openAIConstructorMock(options);
+    }
     audio = { transcriptions: { create: createMock } };
   },
 }));
@@ -98,8 +102,28 @@ function uploadStalledResponse() {
   };
 }
 
+function apiErrorResponse(status: number) {
+  return {
+    withResponse: async () => {
+      channel('undici:request:create').publish({ request: diagnosticRequest });
+      channel('undici:request:bodySent').publish({
+        request: diagnosticRequest,
+      });
+      channel('undici:request:headers').publish({
+        request: diagnosticRequest,
+        response: { statusCode: status },
+      });
+      throw Object.assign(new Error(`HTTP ${status}`), {
+        name: 'APIStatusError',
+        status,
+      });
+    },
+  };
+}
+
 beforeEach(() => {
   createMock.mockReset();
+  openAIConstructorMock.mockReset();
   vi.unstubAllGlobals();
   delete process.env.OPENAI_API_KEY;
 });
@@ -138,6 +162,11 @@ describe('transcription diagnostics and fallback', () => {
       },
     });
     expect(outcome.diagnostic.attempts[0].transport.bodySentMs).toBeDefined();
+    expect(outcome.diagnostic.attempts[0].dispatcher).toMatchObject({
+      strategy: 'disposable_per_attempt',
+      destroyStartedMs: expect.any(Number),
+      destroyCompletedMs: expect.any(Number),
+    });
     const uploadedFile = createMock.mock.calls[0][0].file as File;
     expect(uploadedFile.name).toBe('voice.ogg');
   });
@@ -174,6 +203,58 @@ describe('transcription diagnostics and fallback', () => {
         response_format: 'json',
       }),
     );
+    const firstDispatcher =
+      openAIConstructorMock.mock.calls[0][0].fetchOptions.dispatcher;
+    const retryDispatcher =
+      openAIConstructorMock.mock.calls[1][0].fetchOptions.dispatcher;
+    expect(retryDispatcher).not.toBe(firstDispatcher);
+  });
+
+  it('retries plain transcription once without changing models', async () => {
+    createMock
+      .mockReturnValueOnce(uploadStalledResponse())
+      .mockReturnValueOnce(
+        successfulResponse({ text: 'fresh recovery' }, 'req_fresh'),
+      );
+
+    const outcome = await transcribeAudioDetailed(
+      Buffer.from('audio'),
+      'voice.oga',
+      {
+        context: 'test',
+        primaryMode: 'gpt4o_plain_json',
+        enablePlainFallback: false,
+      },
+    );
+
+    expect(outcome.transcript).toBe('fresh recovery');
+    expect(outcome.diagnostic.classification).toBe(
+      'transcription_fresh_connection_retry_succeeded',
+    );
+    expect(createMock).toHaveBeenCalledTimes(2);
+    expect(createMock.mock.calls[0][0].model).toBe('gpt-4o-mini-transcribe');
+    expect(createMock.mock.calls[1][0].model).toBe('gpt-4o-mini-transcribe');
+    expect(
+      openAIConstructorMock.mock.calls[1][0].fetchOptions.dispatcher,
+    ).not.toBe(openAIConstructorMock.mock.calls[0][0].fetchOptions.dispatcher);
+  });
+
+  it('does not retry explicit OpenAI API errors', async () => {
+    createMock.mockReturnValueOnce(apiErrorResponse(429));
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ status: 401 }));
+
+    const outcome = await transcribeAudioDetailed(
+      Buffer.from('audio'),
+      'voice.oga',
+      { context: 'test' },
+    );
+
+    expect(outcome.transcript).toBeNull();
+    expect(outcome.diagnostic.classification).toBe(
+      'transcription_api_error_response',
+    );
+    expect(createMock).toHaveBeenCalledTimes(1);
+    expect(outcome.diagnostic.attempts).toHaveLength(1);
   });
 
   it('classifies body-sent/no-headers failures when OpenAI edge is reachable', async () => {

@@ -12,6 +12,10 @@ import {
 } from './config.js';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
+import {
+  createDisposableDispatcher,
+  type DispatcherLifecycleTrace,
+} from './disposable-dispatcher.js';
 
 const FALLBACK = '[Voice message — transcription unavailable]';
 const OPENAI_ORIGIN = 'https://api.openai.com';
@@ -41,6 +45,7 @@ type AttemptDiagnostic = {
   elapsedMs: number;
   requestId?: string | null;
   transport: Omit<TransportTrace, 'attemptId' | 'startedAtMs'>;
+  dispatcher: DispatcherLifecycleTrace;
   error?: Record<string, unknown>;
 };
 
@@ -203,6 +208,7 @@ async function runAttempt(
   // multipart filename extension and rejects that alias even though the bytes
   // and MIME type are valid Ogg audio.
   const uploadFilename = filename.replace(/\.oga$/i, '.ogg');
+  const disposable = createDisposableDispatcher(startedAtMs);
 
   logger.info(
     { ...commonLog, attemptId, mode, model, uploadFilename, timeoutMs },
@@ -210,7 +216,12 @@ async function runAttempt(
   );
 
   try {
-    const openai = new OpenAI({ apiKey, timeout: timeoutMs, maxRetries: 0 });
+    const openai = new OpenAI({
+      apiKey,
+      timeout: timeoutMs,
+      maxRetries: 0,
+      fetchOptions: { dispatcher: disposable.dispatcher },
+    });
     const file = new File([audioBuffer], uploadFilename, { type: 'audio/ogg' });
     const response = await transportContext.run(trace, () => {
       const apiPromise =
@@ -241,6 +252,7 @@ async function runAttempt(
     ) {
       transcript = renderWithPauses(result.words) || transcript;
     }
+    await disposable.destroy();
 
     const diagnostic: AttemptDiagnostic = {
       attemptId,
@@ -251,6 +263,7 @@ async function runAttempt(
       elapsedMs: Date.now() - startedAtMs,
       requestId: response.request_id,
       transport: publicTransportTrace(trace),
+      dispatcher: disposable.trace,
     };
     logger.info(
       {
@@ -263,6 +276,8 @@ async function runAttempt(
     );
     return { transcript, diagnostic };
   } catch (error) {
+    await disposable.captureFailureSnapshot();
+    await disposable.destroy();
     const diagnostic: AttemptDiagnostic = {
       attemptId,
       mode,
@@ -271,6 +286,7 @@ async function runAttempt(
       timeoutMs,
       elapsedMs: Date.now() - startedAtMs,
       transport: publicTransportTrace(trace),
+      dispatcher: disposable.trace,
       error: describeError(error),
     };
     logger.error(
@@ -288,24 +304,35 @@ async function probeOpenAIConnectivity(): Promise<{
   error?: Record<string, unknown>;
 }> {
   const startedAtMs = Date.now();
+  const disposable = createDisposableDispatcher(startedAtMs);
   try {
     // A 401 is expected: the probe deliberately sends no credential or user
     // content. Any HTTP response proves DNS/TCP/TLS and OpenAI edge reachability.
     const response = await fetch(`${OPENAI_ORIGIN}/v1/models`, {
       signal: AbortSignal.timeout(CONNECTIVITY_PROBE_TIMEOUT_MS),
+      dispatcher: disposable.dispatcher,
     });
+    await disposable.destroy();
     return {
       reachable: true,
       status: response.status,
       elapsedMs: Date.now() - startedAtMs,
     };
   } catch (error) {
+    await disposable.destroy();
     return {
       reachable: false,
       elapsedMs: Date.now() - startedAtMs,
       error: describeError(error),
     };
   }
+}
+
+function isRetryableTransportFailure(attempt: AttemptDiagnostic): boolean {
+  return (
+    attempt.transport.responseHeadersMs === undefined &&
+    attempt.error !== undefined
+  );
 }
 
 function classifyFailure(
@@ -401,10 +428,7 @@ export async function transcribeAudioDetailed(
     };
   }
 
-  if (
-    options.enablePlainFallback === false ||
-    primaryMode === 'gpt4o_plain_json'
-  ) {
+  if (!isRetryableTransportFailure(primary.diagnostic)) {
     const connectivityProbe = await probeOpenAIConnectivity();
     const diagnostic: TranscriptionDiagnostic = {
       ...baseDiagnostic,
@@ -412,47 +436,58 @@ export async function transcribeAudioDetailed(
       attempts: [primary.diagnostic],
       connectivityProbe,
     };
-    logger.error(diagnostic, 'OpenAI transcription failed without fallback');
+    logger.error(
+      diagnostic,
+      'OpenAI transcription failed with a non-retryable response',
+    );
     return { transcript: null, diagnostic };
   }
 
+  const retryMode =
+    options.enablePlainFallback !== false &&
+    primaryMode === 'whisper_word_timestamps'
+      ? 'gpt4o_plain_json'
+      : primaryMode;
   logger.warn(
     {
       ...common,
       failedAttemptId: primary.diagnostic.attemptId,
-      fallbackMode: 'gpt4o_plain_json',
+      retryMode,
     },
-    'Word-timestamp transcription failed; trying plain JSON fallback',
+    'OpenAI transcription transport failed; retrying with a fresh connection',
   );
-  const fallback = await runAttempt(
+  const retry = await runAttempt(
     apiKey,
     audioBuffer,
     filename,
-    'gpt4o_plain_json',
+    retryMode,
     options.fallbackTimeoutMs ?? TRANSCRIPTION_FALLBACK_TIMEOUT_MS,
     common,
   );
-  if (fallback.transcript) {
+  if (retry.transcript) {
     const diagnostic: TranscriptionDiagnostic = {
       ...baseDiagnostic,
-      classification: 'word_timestamps_failed_plain_fallback_succeeded',
-      attempts: [primary.diagnostic, fallback.diagnostic],
+      classification:
+        retryMode === 'gpt4o_plain_json' && retryMode !== primaryMode
+          ? 'word_timestamps_failed_plain_fallback_succeeded'
+          : 'transcription_fresh_connection_retry_succeeded',
+      attempts: [primary.diagnostic, retry.diagnostic],
     };
     logger.warn(
       diagnostic,
-      'Plain transcription recovered failed word-timestamp request',
+      'Fresh connection recovered failed transcription request',
     );
-    return { transcript: fallback.transcript, diagnostic };
+    return { transcript: retry.transcript, diagnostic };
   }
 
   const connectivityProbe = await probeOpenAIConnectivity();
   const diagnostic: TranscriptionDiagnostic = {
     ...baseDiagnostic,
     classification: classifyFailure(
-      [primary.diagnostic, fallback.diagnostic],
+      [primary.diagnostic, retry.diagnostic],
       connectivityProbe,
     ),
-    attempts: [primary.diagnostic, fallback.diagnostic],
+    attempts: [primary.diagnostic, retry.diagnostic],
     connectivityProbe,
   };
   logger.error(

@@ -148,12 +148,12 @@ server.tool(
   },
   async (args) => {
     try {
-      // The host has a 30s network budget. Keep the IPC wait strictly longer
-      // so a result written at the network deadline is not falsely orphaned.
+      // The host can make two 30s attempts over separate connections. Keep the
+      // IPC wait longer so the fresh-connection result is not falsely orphaned.
       const output = await requestHostAction(
         'ttsSpeak',
         { text: args.text, ...(args.voice ? { voice: args.voice } : {}) },
-        45_000,
+        75_000,
       );
       const { audioPath } = JSON.parse(output);
       writeIpcFile(MESSAGES_DIR, {
@@ -195,7 +195,9 @@ server.tool(
       const output = await requestHostAction(
         'transcribeAudio',
         { audioPath: args.audioPath },
-        135_000,
+        // Retained audio gets a 120s primary attempt, a 30s fresh-connection
+        // retry, bounded socket diagnostics, and a 5s connectivity probe.
+        170_000,
       );
       const result = JSON.parse(output) as {
         transcript?: string;
