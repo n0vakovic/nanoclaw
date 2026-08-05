@@ -66,6 +66,10 @@ export const HOST_ACTION_FETCH_TIMEOUT_MS = parseInt(
   process.env.HOST_ACTION_FETCH_TIMEOUT_MS || '30000',
   10,
 );
+export const TTS_FETCH_TIMEOUT_MS = parseInt(
+  process.env.TTS_FETCH_TIMEOUT_MS || '30000',
+  10,
+); // ElevenLabs request budget; the agent IPC wait must be strictly longer
 
 // Absolute paths needed for container mounts
 const PROJECT_ROOT = process.cwd();

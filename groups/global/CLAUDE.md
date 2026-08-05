@@ -64,6 +64,11 @@ on anything else possible; the original audio remains available.
 
 ## Communication
 
+When `send_voice_note` fails, report its exact TTS classification and request
+details. A tool timeout alone does not establish that the host or ElevenLabs is
+down; never invent that diagnosis. Continue in text if needed without claiming
+the service state.
+
 Your output is sent to the user or group.
 
 You also have `mcp__nanoclaw__send_message` which sends a message immediately while you're still working. This is useful when you want to acknowledge a request before starting longer work.

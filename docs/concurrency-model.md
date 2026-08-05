@@ -44,6 +44,7 @@ is still stored, rather than the whole handler being abandoned.
 | Guard                                                       | Where                                                                | Budget                                                                   | Protects                                                                                                                              |
 | ----------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
 | Per-fetch timeout (`fetchWithTimeout`)                      | media downloads in `telegram.ts`; every `fetch` in `host-actions.ts` | `TELEGRAM_MEDIA_TIMEOUT_MS` = 15s / `HOST_ACTION_FETCH_TIMEOUT_MS` = 30s | graceful degradation — a stalled download rejects into its catch and the message stores with fallback text                            |
+| ElevenLabs TTS request / agent IPC wait                     | `tts.ts` / `send_voice_note` in the agent MCP server                 | `TTS_FETCH_TIMEOUT_MS` = 30s / IPC wait = 45s                            | keeps a bounded host request while ensuring a deadline result cannot be falsely reported as an agent-side timeout                      |
 | Automatic word-timestamp attempt                            | `transcription.ts` (`whisper-1`, verbose JSON)                       | `TRANSCRIPTION_TIMEOUT_MS` = 30s                                         | preserves pause markers when the word-timestamp path is healthy                                                                       |
 | Automatic plain-text fallback                               | `transcription.ts` (`gpt-4o-mini-transcribe`, JSON)                  | `TRANSCRIPTION_FALLBACK_TIMEOUT_MS` = 30s                                | uses a different model/request shape when word timestamps stall; both attempts fit inside the handler budget                          |
 | Retained-audio retry                                        | `host-actions.ts` and automatic retry in `telegram.ts`               | `RETAINED_TRANSCRIPTION_TIMEOUT_MS` = 120s                               | gives the simpler plain-transcription request room to recover without blocking Telegram's inbound handler                             |
@@ -65,6 +66,14 @@ credential-free connectivity probe also times out. This prevents a secondary
 probe from becoming the false claim that OpenAI was down. The same structured
 diagnostic is stored in the retained voice metadata JSON, so evidence survives
 log rotation and remains coupled to the exact audio by SHA-256.
+
+ElevenLabs TTS attempts similarly record the host-action request ID, attempt
+ID, text length, model and voice IDs, elapsed time, response request ID, and
+undici transport phases. Failures distinguish a request that never sent its
+body from an uploaded request with no response, API error responses, and
+response-body failures. The agent's IPC wait is deliberately longer than the
+host network timeout, preventing a completed deadline result from being
+orphaned.
 
 Failed Telegram transcriptions keep the audio plus retry state in the group IPC
 media directory. Automatic retries use the plain transcription model, persist a

@@ -20,6 +20,7 @@ import {
   GROUPS_DIR,
   HOST_ACTION_FETCH_TIMEOUT_MS,
   RETAINED_TRANSCRIPTION_TIMEOUT_MS,
+  TTS_FETCH_TIMEOUT_MS,
 } from './config.js';
 import { readEnvFile } from './env.js';
 import { fetchWithTimeout } from './timeout.js';
@@ -39,6 +40,7 @@ import {
   RegisteredGroup,
 } from './types.js';
 import { transcribeAudioDetailed } from './transcription.js';
+import { synthesizeSpeechDetailed } from './tts.js';
 import {
   googleCalendarList,
   googleDocsRead,
@@ -73,6 +75,7 @@ export interface ActionResult {
  * Handlers that need to write container-readable files use groupIpcDir.
  */
 export interface ActionContext {
+  requestId?: string;
   sourceGroup: string;
   sourceChatJid?: string;
   groupIpcDir: string;
@@ -756,29 +759,25 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
         'ttsSpeak: no voice_id/voice provided and ELEVENLABS_VOICE_ID not set',
       );
 
-    const res = await fetchWithTimeout(
-      `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
-      HOST_ACTION_FETCH_TIMEOUT_MS,
-      {
-        method: 'POST',
-        headers: {
-          'xi-api-key': apiKey,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          text,
-          model_id: model_id ?? 'eleven_turbo_v2_5',
-          voice_settings: { stability: 0.5, similarity_boost: 0.75 },
-        }),
+    const outcome = await synthesizeSpeechDetailed({
+      apiKey,
+      text,
+      voiceId,
+      modelId: model_id ?? 'eleven_turbo_v2_5',
+      timeoutMs: TTS_FETCH_TIMEOUT_MS,
+      context: {
+        hostActionRequestId: ctx?.requestId,
+        sourceGroup: ctx?.sourceGroup,
       },
-    );
-
-    if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`ElevenLabs ${res.status}: ${body}`);
+    });
+    if (!outcome.audio) {
+      throw new Error(
+        `ttsSpeak: ${outcome.diagnostic.classification}; diagnostic=${JSON.stringify(outcome.diagnostic)}${
+          outcome.responseBody ? `; response=${outcome.responseBody}` : ''
+        }`,
+      );
     }
-
-    const buffer = Buffer.from(await res.arrayBuffer());
+    const buffer = outcome.audio;
     const filename = `tts-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.mp3`;
 
     let hostPath: string;
@@ -1737,7 +1736,10 @@ export async function dispatchAction(
   }
 
   try {
-    const output = await handler(request.params, ctx);
+    const output = await handler(
+      request.params,
+      ctx ? { ...ctx, requestId: request.requestId } : ctx,
+    );
     return { requestId: request.requestId, ok: true, output };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

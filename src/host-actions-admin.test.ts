@@ -16,12 +16,14 @@ const testPaths = vi.hoisted(() => {
 });
 
 const transcribeAudioDetailedMock = vi.hoisted(() => vi.fn());
+const synthesizeSpeechDetailedMock = vi.hoisted(() => vi.fn());
 
 vi.mock('./config.js', () => ({
   DATA_DIR: testPaths.dataDir,
   GROUPS_DIR: testPaths.groupsDir,
   GITHUB_ALLOWLIST_PATH: testPaths.githubAllowlistPath,
   RETAINED_TRANSCRIPTION_TIMEOUT_MS: 45000,
+  TTS_FETCH_TIMEOUT_MS: 30000,
 }));
 
 vi.mock('./logger.js', () => ({
@@ -41,6 +43,10 @@ vi.mock('./transcription.js', () => ({
   transcribeAudioDetailed: transcribeAudioDetailedMock,
 }));
 
+vi.mock('./tts.js', () => ({
+  synthesizeSpeechDetailed: synthesizeSpeechDetailedMock,
+}));
+
 import { dispatchAction } from './host-actions.js';
 import { writeIntergroupInboxItem } from './intergroup-inbox.js';
 import { RegisteredGroup } from './types.js';
@@ -53,10 +59,53 @@ const mainContext = {
 
 beforeEach(() => {
   transcribeAudioDetailedMock.mockReset();
+  synthesizeSpeechDetailedMock.mockReset();
   fs.rmSync(testPaths.base, { recursive: true, force: true });
   fs.mkdirSync(path.join(testPaths.groupsDir, 'global'), { recursive: true });
   fs.mkdirSync(path.join(testPaths.groupsDir, 'other-group'), {
     recursive: true,
+  });
+});
+
+describe('TTS host action', () => {
+  it('correlates the host action request and writes generated audio', async () => {
+    const groupIpcDir = path.join(testPaths.base, 'ipc', 'telegram_main');
+    vi.stubEnv('ELEVENLABS_API_KEY', 'test-eleven-key');
+    synthesizeSpeechDetailedMock.mockResolvedValue({
+      audio: Buffer.from('mp3 bytes'),
+      diagnostic: { classification: 'tts_succeeded' },
+    });
+
+    const result = await dispatchAction(
+      {
+        action: 'ttsSpeak',
+        requestId: 'tts-request-1',
+        params: { text: 'Hello', voice: 'vlad' },
+      },
+      { ...mainContext, groupIpcDir },
+    );
+
+    expect(result.ok).toBe(true);
+    const output = JSON.parse(result.output) as { audioPath: string };
+    expect(output.audioPath).toMatch(/^\/workspace\/ipc\/media\/tts-.*\.mp3$/);
+    expect(synthesizeSpeechDetailedMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        apiKey: 'test-eleven-key',
+        text: 'Hello',
+        voiceId: 'XjdmlV0OFXfXE6Mg2Sb7',
+        timeoutMs: 30000,
+        context: {
+          hostActionRequestId: 'tts-request-1',
+          sourceGroup: 'telegram_main',
+        },
+      }),
+    );
+    const hostAudioPath = path.join(
+      groupIpcDir,
+      output.audioPath.replace('/workspace/ipc/', ''),
+    );
+    expect(fs.readFileSync(hostAudioPath)).toEqual(Buffer.from('mp3 bytes'));
+    vi.unstubAllEnvs();
   });
 });
 
