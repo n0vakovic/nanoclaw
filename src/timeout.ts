@@ -43,7 +43,22 @@ export function withTimeout<T>(
 export function fetchWithTimeout(
   url: string,
   ms: number,
-  init?: RequestInit & { dispatcher?: import('undici').Dispatcher },
+  init?: RequestInit & { dispatcher?: Dispatcher },
 ): Promise<Response> {
-  return fetch(url, { ...init, signal: AbortSignal.timeout(ms) });
+  const requestInit = { ...init, signal: AbortSignal.timeout(ms) };
+  if (init?.dispatcher) {
+    // Node's bundled fetch and an npm-installed Dispatcher are not guaranteed
+    // to share the same internal handler ABI. Keep fetch and Dispatcher from
+    // the same Undici package whenever a custom Dispatcher is supplied.
+    return undiciFetch(
+      url,
+      requestInit as UndiciRequestInit,
+    ) as unknown as Promise<Response>;
+  }
+  return fetch(url, requestInit);
 }
+import {
+  fetch as undiciFetch,
+  type Dispatcher,
+  type RequestInit as UndiciRequestInit,
+} from 'undici';

@@ -2,6 +2,7 @@ import { channel } from 'node:diagnostics_channel';
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+const undiciFetchMock = vi.hoisted(() => vi.fn());
 const loggerMock = vi.hoisted(() => ({
   info: vi.fn(),
   warn: vi.fn(),
@@ -9,6 +10,10 @@ const loggerMock = vi.hoisted(() => ({
 }));
 
 vi.mock('./logger.js', () => ({ logger: loggerMock }));
+vi.mock('undici', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('undici')>()),
+  fetch: undiciFetchMock,
+}));
 
 import { synthesizeSpeechDetailed } from './tts.js';
 
@@ -50,21 +55,18 @@ const baseOptions = {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.unstubAllGlobals();
+  undiciFetchMock.mockReset();
 });
 
 describe('ElevenLabs TTS diagnostics', () => {
   it('records request phases, request ID, and audio bytes on success', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => {
-        publishRequestPhases({ bodySent: true, headers: 200 });
-        return new Response(Buffer.from('mp3 bytes'), {
-          status: 200,
-          headers: { 'request-id': 'eleven-request-1' },
-        });
-      }),
-    );
+    undiciFetchMock.mockImplementation(async () => {
+      publishRequestPhases({ bodySent: true, headers: 200 });
+      return new Response(Buffer.from('mp3 bytes'), {
+        status: 200,
+        headers: { 'request-id': 'eleven-request-1' },
+      });
+    });
 
     const outcome = await synthesizeSpeechDetailed(baseOptions);
 
@@ -87,17 +89,14 @@ describe('ElevenLabs TTS diagnostics', () => {
   });
 
   it('classifies a stall before the request body was sent', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => {
-        const error = Object.assign(new Error('The operation was aborted'), {
-          name: 'TimeoutError',
-          code: 23,
-        });
-        publishRequestPhases({ error });
-        throw error;
-      }),
-    );
+    undiciFetchMock.mockImplementation(async () => {
+      const error = Object.assign(new Error('The operation was aborted'), {
+        name: 'TimeoutError',
+        code: 23,
+      });
+      publishRequestPhases({ error });
+      throw error;
+    });
 
     const outcome = await synthesizeSpeechDetailed(baseOptions);
 
@@ -113,23 +112,20 @@ describe('ElevenLabs TTS diagnostics', () => {
       code: 23,
     });
     expect(outcome.diagnostic.attempts).toHaveLength(2);
-    expect(fetch).toHaveBeenCalledTimes(2);
-    const firstDispatcher = vi.mocked(fetch).mock.calls[0][1]?.dispatcher;
-    const retryDispatcher = vi.mocked(fetch).mock.calls[1][1]?.dispatcher;
+    expect(undiciFetchMock).toHaveBeenCalledTimes(2);
+    const firstDispatcher = undiciFetchMock.mock.calls[0][1]?.dispatcher;
+    const retryDispatcher = undiciFetchMock.mock.calls[1][1]?.dispatcher;
     expect(firstDispatcher).toBeDefined();
     expect(retryDispatcher).toBeDefined();
     expect(retryDispatcher).not.toBe(firstDispatcher);
   });
 
   it('classifies no response after a completed upload', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => {
-        const error = new Error('timed out');
-        publishRequestPhases({ bodySent: true, error });
-        throw error;
-      }),
-    );
+    undiciFetchMock.mockImplementation(async () => {
+      const error = new Error('timed out');
+      publishRequestPhases({ bodySent: true, error });
+      throw error;
+    });
 
     const outcome = await synthesizeSpeechDetailed(baseOptions);
 
@@ -138,24 +134,20 @@ describe('ElevenLabs TTS diagnostics', () => {
       'tts_backend_no_response_after_upload',
     );
     expect(outcome.diagnostic.attempts).toHaveLength(2);
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(undiciFetchMock).toHaveBeenCalledTimes(2);
   });
 
   it('recovers one transport failure over a fresh dispatcher', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi
-        .fn()
-        .mockImplementationOnce(async () => {
-          const error = new Error('timed out');
-          publishRequestPhases({ bodySent: true, error });
-          throw error;
-        })
-        .mockImplementationOnce(async () => {
-          publishRequestPhases({ bodySent: true, headers: 200 });
-          return new Response(Buffer.from('recovered mp3'), { status: 200 });
-        }),
-    );
+    undiciFetchMock
+      .mockImplementationOnce(async () => {
+        const error = new Error('timed out');
+        publishRequestPhases({ bodySent: true, error });
+        throw error;
+      })
+      .mockImplementationOnce(async () => {
+        publishRequestPhases({ bodySent: true, headers: 200 });
+        return new Response(Buffer.from('recovered mp3'), { status: 200 });
+      });
 
     const outcome = await synthesizeSpeechDetailed(baseOptions);
 
@@ -164,23 +156,20 @@ describe('ElevenLabs TTS diagnostics', () => {
       'tts_fresh_connection_retry_succeeded',
     );
     expect(outcome.diagnostic.attempts).toHaveLength(2);
-    expect(fetch).toHaveBeenCalledTimes(2);
-    expect(vi.mocked(fetch).mock.calls[1][1]?.dispatcher).not.toBe(
-      vi.mocked(fetch).mock.calls[0][1]?.dispatcher,
+    expect(undiciFetchMock).toHaveBeenCalledTimes(2);
+    expect(undiciFetchMock.mock.calls[1][1]?.dispatcher).not.toBe(
+      undiciFetchMock.mock.calls[0][1]?.dispatcher,
     );
   });
 
   it('preserves API response status, request ID, and error body', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => {
-        publishRequestPhases({ bodySent: true, headers: 429 });
-        return new Response('{"detail":"rate limited"}', {
-          status: 429,
-          headers: { 'request-id': 'eleven-request-429' },
-        });
-      }),
-    );
+    undiciFetchMock.mockImplementation(async () => {
+      publishRequestPhases({ bodySent: true, headers: 429 });
+      return new Response('{"detail":"rate limited"}', {
+        status: 429,
+        headers: { 'request-id': 'eleven-request-429' },
+      });
+    });
 
     const outcome = await synthesizeSpeechDetailed(baseOptions);
 
@@ -191,7 +180,7 @@ describe('ElevenLabs TTS diagnostics', () => {
       requestId: 'eleven-request-429',
       transport: { responseStatus: 429 },
     });
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(undiciFetchMock).toHaveBeenCalledTimes(1);
     expect(outcome.diagnostic.attempts).toBeUndefined();
   });
 });

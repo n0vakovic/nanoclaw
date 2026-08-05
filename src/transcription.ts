@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { channel } from 'node:diagnostics_channel';
 
 import OpenAI from 'openai';
+import { fetch as undiciFetch } from 'undici';
 
 import {
   LONG_PAUSE_THRESHOLD_S,
@@ -12,6 +13,7 @@ import {
 } from './config.js';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
+import { fetchWithTimeout } from './timeout.js';
 import {
   createDisposableDispatcher,
   type DispatcherLifecycleTrace,
@@ -220,6 +222,7 @@ async function runAttempt(
       apiKey,
       timeout: timeoutMs,
       maxRetries: 0,
+      fetch: undiciFetch as unknown as typeof fetch,
       fetchOptions: { dispatcher: disposable.dispatcher },
     });
     const file = new File([audioBuffer], uploadFilename, { type: 'audio/ogg' });
@@ -308,10 +311,11 @@ async function probeOpenAIConnectivity(): Promise<{
   try {
     // A 401 is expected: the probe deliberately sends no credential or user
     // content. Any HTTP response proves DNS/TCP/TLS and OpenAI edge reachability.
-    const response = await fetch(`${OPENAI_ORIGIN}/v1/models`, {
-      signal: AbortSignal.timeout(CONNECTIVITY_PROBE_TIMEOUT_MS),
-      dispatcher: disposable.dispatcher,
-    });
+    const response = await fetchWithTimeout(
+      `${OPENAI_ORIGIN}/v1/models`,
+      CONNECTIVITY_PROBE_TIMEOUT_MS,
+      { dispatcher: disposable.dispatcher },
+    );
     await disposable.destroy();
     return {
       reachable: true,

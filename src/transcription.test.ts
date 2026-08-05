@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const createMock = vi.hoisted(() => vi.fn());
 const openAIConstructorMock = vi.hoisted(() => vi.fn());
+const undiciFetchMock = vi.hoisted(() => vi.fn());
 
 vi.mock('openai', () => ({
   default: class OpenAIMock {
@@ -12,6 +13,10 @@ vi.mock('openai', () => ({
     }
     audio = { transcriptions: { create: createMock } };
   },
+}));
+vi.mock('undici', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('undici')>()),
+  fetch: undiciFetchMock,
 }));
 
 vi.mock('./config.js', () => ({
@@ -124,7 +129,7 @@ function apiErrorResponse(status: number) {
 beforeEach(() => {
   createMock.mockReset();
   openAIConstructorMock.mockReset();
-  vi.unstubAllGlobals();
+  undiciFetchMock.mockReset();
   delete process.env.OPENAI_API_KEY;
 });
 
@@ -167,6 +172,7 @@ describe('transcription diagnostics and fallback', () => {
       destroyStartedMs: expect.any(Number),
       destroyCompletedMs: expect.any(Number),
     });
+    expect(openAIConstructorMock.mock.calls[0][0].fetch).toBe(undiciFetchMock);
     const uploadedFile = createMock.mock.calls[0][0].file as File;
     expect(uploadedFile.name).toBe('voice.ogg');
   });
@@ -241,7 +247,7 @@ describe('transcription diagnostics and fallback', () => {
 
   it('does not retry explicit OpenAI API errors', async () => {
     createMock.mockReturnValueOnce(apiErrorResponse(429));
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ status: 401 }));
+    undiciFetchMock.mockResolvedValue({ status: 401 });
 
     const outcome = await transcribeAudioDetailed(
       Buffer.from('audio'),
@@ -261,7 +267,7 @@ describe('transcription diagnostics and fallback', () => {
     createMock
       .mockReturnValueOnce(timedOutResponse())
       .mockReturnValueOnce(timedOutResponse());
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ status: 401 }));
+    undiciFetchMock.mockResolvedValue({ status: 401 });
 
     const outcome = await transcribeAudioDetailed(
       Buffer.from('audio'),
@@ -292,14 +298,11 @@ describe('transcription diagnostics and fallback', () => {
     createMock
       .mockReturnValueOnce(uploadStalledResponse())
       .mockReturnValueOnce(uploadStalledResponse());
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockRejectedValue(
-        Object.assign(new Error('probe timed out'), {
-          name: 'TimeoutError',
-          code: 23,
-        }),
-      ),
+    undiciFetchMock.mockRejectedValue(
+      Object.assign(new Error('probe timed out'), {
+        name: 'TimeoutError',
+        code: 23,
+      }),
     );
 
     const outcome = await transcribeAudioDetailed(
