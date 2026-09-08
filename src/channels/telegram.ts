@@ -3,6 +3,13 @@ import path from 'path';
 
 import { Api, Bot, InputFile } from 'grammy';
 import type { Transformer } from 'grammy';
+import type { Update } from 'grammy/types';
+import {
+  TelegramIngress,
+  IngressPersistenceError,
+  isImmediateTelegramUpdate,
+} from '../telegram-ingress.js';
+import { captureIncident, recoveryStateDir } from '../recovery.js';
 
 import {
   ASSISTANT_NAME,
@@ -151,6 +158,7 @@ function wrapReplyContext(
 }
 
 export class TelegramChannel implements Channel {
+  private ingress?: TelegramIngress<Update>;
   name = 'telegram';
 
   private bot: Bot | null = null;
@@ -693,11 +701,43 @@ export class TelegramChannel implements Channel {
       ) as unknown as Transformer,
     );
 
-    // Inbound backstop: grammy processes updates sequentially, so one hung
-    // handler would freeze the whole poll loop. Registered FIRST so it wraps
-    // every command/message handler below — no update can block longer than
-    // its budget. See docs/concurrency-model.md.
-    this.bot.use(createHandlerTimeoutMiddleware(TELEGRAM_HANDLER_TIMEOUT_MS));
+    // Journal ordinary updates before releasing grammY's sequential poll loop.
+    // A single worker preserves ordinary ordering; host controls bypass it.
+    const ingressBot = this.bot;
+    this.ingress = new TelegramIngress<Update>(
+      path.join(recoveryStateDir(), 'telegram-inbound'),
+      (update) => ingressBot.handleUpdate(update),
+      (err) =>
+        logger.error(
+          { errorType: err instanceof Error ? err.name : 'unknown' },
+          'Telegram ordinary update processing failed; journal retained',
+        ),
+      30_000,
+      async (update) => {
+        const chatId = update.message?.chat.id;
+        const incident = captureIncident('telegram_ingress_failed', {
+          messageId: String(update.update_id),
+          phase: 'telegram_ingress',
+          groupJid: chatId === undefined ? undefined : `tg:${chatId}`,
+        });
+        if (
+          chatId !== undefined &&
+          this.opts.registeredGroups()[`tg:${chatId}`]
+        ) {
+          await ingressBot.api.sendMessage(
+            chatId,
+            `I couldn't process this message after one retry. Incident ${incident}. The original update is saved for diagnosis; later messages can continue. /status and recovery commands still work.`,
+          );
+        }
+      },
+    );
+    this.bot.use((ctx, next) => this.ingress!.handle(ctx.update, next));
+    const guard = createHandlerTimeoutMiddleware(TELEGRAM_HANDLER_TIMEOUT_MS);
+    // The durable worker must observe the actual handler completion. Abandoning
+    // it on a timeout would delete the journal while its side effects still run.
+    this.bot.use((ctx, next) =>
+      isImmediateTelegramUpdate(ctx.update) ? guard(ctx, next) : next(),
+    );
 
     // Command to get chat ID (useful for registration)
     this.bot.command('chatid', (ctx) => {
@@ -719,7 +759,16 @@ export class TelegramChannel implements Channel {
       ctx.reply(`${ASSISTANT_NAME} is online.`);
     });
 
-    for (const command of ['approve', 'reject']) {
+    for (const command of [
+      'approve',
+      'reject',
+      'status',
+      'jobs',
+      'cancel',
+      'clear',
+      'restart',
+      'steer',
+    ]) {
       this.bot.command(command, async (ctx) => {
         if (!this.opts.onHostCommand) {
           await ctx.reply('Host approval commands are not configured.');
@@ -749,6 +798,7 @@ export class TelegramChannel implements Channel {
             message,
           );
           await ctx.reply(result.reply);
+          result.afterReply?.();
         } catch (err) {
           logger.warn({ err, command, chatJid, sender }, 'Host command failed');
           await ctx.reply(
@@ -1225,12 +1275,14 @@ export class TelegramChannel implements Channel {
 
     // Handle errors gracefully
     this.bot.catch((err) => {
+      if (err.error instanceof IngressPersistenceError) throw err.error;
       logger.error({ err: err.message }, 'Telegram bot error');
     });
 
     // Start polling — returns a Promise that resolves when started
-    return new Promise<void>((resolve) => {
-      this.bot!.start({
+    return new Promise<void>((resolve, reject) => {
+      let connected = false;
+      const polling = this.bot!.start({
         onStart: (botInfo) => {
           logger.info(
             { username: botInfo.username, id: botInfo.id },
@@ -1240,9 +1292,22 @@ export class TelegramChannel implements Channel {
           console.log(
             `  Send /chatid to the bot to get a chat's registration ID\n`,
           );
+          this.ingress?.start();
           this.resumeRetainedVoiceRetries();
+          connected = true;
           resolve();
         },
+      });
+      void Promise.resolve(polling).catch((error: unknown) => {
+        this.ingress?.stop();
+        if (!connected) reject(error);
+        else {
+          logger.error(
+            { errorType: error instanceof Error ? error.name : 'unknown' },
+            'Telegram polling stopped fatally',
+          );
+          this.opts.onFatal?.(error);
+        }
       });
     });
   }
@@ -1381,6 +1446,7 @@ export class TelegramChannel implements Channel {
   }
 
   async disconnect(): Promise<void> {
+    this.ingress?.stop();
     for (const timer of this.voiceRetryTimers.values()) clearTimeout(timer);
     this.voiceRetryTimers.clear();
     if (this.bot) {

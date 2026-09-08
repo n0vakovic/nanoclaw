@@ -115,6 +115,20 @@ silent loss is not.
 Migration: when `last_confirmed_timestamp` is absent it defaults to the current
 handoff cursor, so an upgrade does not reprocess the backlog.
 
+## Foreground isolation and recovery (September 2026)
+
+The current host uses detached job and scheduled-task lanes with separate SDK
+sessions and IPC input mounts. Background work reserves one container slot for
+foreground messages. Recovery commands bypass the durable ordinary Telegram
+update worker, so slow transcription does not queue those commands. See
+[recovery.md](recovery.md) for command semantics, journal behavior, restart
+reconciliation, diagnostic records, and the independent supervisor.
+
+Runner progress is now a separate event and never advances confirmation cursors.
+Only actual completed results can confirm a turn. The foreground queue retries
+a failed turn once, while explicit cancellation suppresses retry and preserves
+the interrupted batch in history.
+
 ## Known residual limitations
 
 - **Result-to-input correlation is coarse.** The confirmed cursor advances to the
@@ -124,7 +138,7 @@ handoff cursor, so an upgrade does not reprocess the backlog.
   B could be considered confirmed by an earlier result. Fixing this precisely
   needs per-message acks from the container, which the protocol does not yet
   carry. The freeze fix removes the crash-loop that made this fire in practice.
-- **Abandoned handlers leak their pending promise.** When the inbound backstop
+- **Abandoned control handlers can retain their pending promise.** When the inbound backstop
   times out a handler, the underlying request may still be pending; it is left to
-  settle or be GC'd. The per-fetch timeout bounds the common case (the media
-  download) so this is rare.
+  settle. Ordinary messages now use the durable worker instead of this backstop;
+  their underlying network calls retain individual time limits.

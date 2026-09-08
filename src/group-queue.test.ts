@@ -2,6 +2,16 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 
 import { GroupQueue } from './group-queue.js';
 
+vi.mock('child_process', async () => {
+  const actual =
+    await vi.importActual<typeof import('child_process')>('child_process');
+  return {
+    ...actual,
+    exec: vi.fn((_cmd, _opts, cb) => cb(null)),
+    execFile: vi.fn((_cmd, _args, _opts, cb) => cb(null)),
+  };
+});
+
 // Mock config to control concurrency limit
 vi.mock('./config.js', () => ({
   DATA_DIR: '/tmp/nanoclaw-test-data',
@@ -98,9 +108,9 @@ describe('GroupQueue', () => {
     expect(processMessages).toHaveBeenCalledTimes(3);
   });
 
-  // --- Tasks prioritized over messages ---
+  // --- Messages prioritized over tasks ---
 
-  it('drains tasks before messages for same group', async () => {
+  it('drains messages before tasks for same group', async () => {
     const executionOrder: string[] = [];
     let resolveFirst: () => void;
 
@@ -134,13 +144,14 @@ describe('GroupQueue', () => {
 
     // Task should have run before the second message check
     expect(executionOrder[0]).toBe('messages'); // first call
-    expect(executionOrder[1]).toBe('task'); // task runs first in drain
+    expect(executionOrder[1]).toBe('messages');
+    expect(executionOrder[2]).toBe('task');
     // Messages would run after task completes
   });
 
   // --- Retry with backoff on failure ---
 
-  it('retries with exponential backoff on failure', async () => {
+  it('retries once after failure', async () => {
     let callCount = 0;
 
     const processMessages = vi.fn(async () => {
@@ -163,7 +174,7 @@ describe('GroupQueue', () => {
     // Second retry after 10000ms (BASE_RETRY_MS * 2^1)
     await vi.advanceTimersByTimeAsync(10000);
     await vi.advanceTimersByTimeAsync(10);
-    expect(callCount).toBe(3);
+    expect(callCount).toBe(2);
   });
 
   // --- Shutdown prevents new enqueues ---
@@ -193,19 +204,19 @@ describe('GroupQueue', () => {
     queue.setProcessMessagesFn(processMessages);
     queue.enqueueMessageCheck('group1@g.us');
 
-    // Run through all 5 retries (MAX_RETRIES = 5)
+    // Run through the single permitted automatic retry
     // Initial call
     await vi.advanceTimersByTimeAsync(10);
     expect(callCount).toBe(1);
 
-    // Retry 1: 5000ms, Retry 2: 10000ms, Retry 3: 20000ms, Retry 4: 40000ms, Retry 5: 80000ms
-    const retryDelays = [5000, 10000, 20000, 40000, 80000];
+    // One retry after 5000ms
+    const retryDelays = [5000];
     for (let i = 0; i < retryDelays.length; i++) {
       await vi.advanceTimersByTimeAsync(retryDelays[i] + 10);
       expect(callCount).toBe(i + 2);
     }
 
-    // After 5 retries (6 total calls), should stop — no more retries
+    // After the one retry, stop until a new incoming message
     const countAfterMaxRetries = callCount;
     await vi.advanceTimersByTimeAsync(200000); // Wait a long time
     expect(callCount).toBe(countAfterMaxRetries);
@@ -480,5 +491,232 @@ describe('GroupQueue', () => {
 
     resolveProcess!();
     await vi.advanceTimersByTimeAsync(10);
+  });
+  it('reserves foreground capacity while background work is running', async () => {
+    let finishBackground!: () => void;
+    const first = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishBackground = resolve;
+        }),
+    );
+    const second = vi.fn(async () => {});
+    const foreground = vi.fn(async () => true);
+    queue.setProcessMessagesFn(foreground);
+    queue.enqueueTask('job:1', '1', first);
+    queue.enqueueTask('job:2', '2', second);
+    expect(second).not.toHaveBeenCalled();
+    queue.enqueueMessageCheck('chat');
+    expect(foreground).toHaveBeenCalledWith('chat');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(second).not.toHaveBeenCalled();
+    finishBackground();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(second).toHaveBeenCalledOnce();
+  });
+
+  it('admits background work alongside an existing foreground conversation', async () => {
+    queue.setProcessMessagesFn(() => new Promise(() => {}));
+    queue.enqueueMessageCheck('chat');
+    const background = vi.fn(() => new Promise<void>(() => {}));
+    queue.enqueueTask('job:1', '1', background);
+    expect(background).toHaveBeenCalledOnce();
+    expect(queue.snapshot().filter((lane) => lane.active)).toHaveLength(2);
+  });
+
+  it('prioritizes waiting foreground lanes over background work', async () => {
+    const releases: Array<() => void> = [];
+    const order: string[] = [];
+    queue.setProcessMessagesFn(async (jid) => {
+      order.push(jid);
+      await new Promise<void>((resolve) => releases.push(resolve));
+      return true;
+    });
+    queue.enqueueMessageCheck('chat:1');
+    queue.enqueueMessageCheck('chat:2');
+    queue.enqueueTask('job:1', '1', async () => {
+      order.push('background');
+    });
+    queue.enqueueMessageCheck('chat:3');
+    releases[0]();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(order).toEqual(['chat:1', 'chat:2', 'chat:3']);
+  });
+
+  it('cancels retry timers and does not replay a failed cancelled run', async () => {
+    const process = vi.fn(async () => false);
+    queue.setProcessMessagesFn(process);
+    queue.enqueueMessageCheck('chat');
+    await vi.advanceTimersByTimeAsync(1);
+    await queue.cancel('chat');
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(process).toHaveBeenCalledOnce();
+    let finish!: (success: boolean) => void;
+    process.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    queue.enqueueMessageCheck('chat');
+    queue.enqueueMessageCheck('chat');
+    const cancellation = queue.cancel('chat');
+    finish(false);
+    await cancellation;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(process).toHaveBeenCalledTimes(2);
+    expect(queue.snapshot()[0]).toMatchObject({
+      active: false,
+      pendingMessages: false,
+    });
+  });
+
+  it('keeps the lane occupied until the stopped run has actually finished', async () => {
+    let finish!: () => void;
+    queue.enqueueTask(
+      'job:1',
+      '1',
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    queue.registerProcess(
+      'job:1',
+      {} as any,
+      'nanoclaw-test',
+      'main',
+      'main/executions/job-1',
+    );
+    const cancelled = vi.fn();
+    const cancellation = queue.cancel('job:1').then(cancelled);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(cancelled).not.toHaveBeenCalled();
+    expect(queue.snapshot()[0]).toMatchObject({
+      active: true,
+      cancelling: true,
+    });
+    const next = vi.fn(async () => {});
+    queue.enqueueTask('job:2', '2', next);
+    expect(next).not.toHaveBeenCalled();
+    finish();
+    await cancellation;
+    await vi.advanceTimersByTimeAsync(1);
+    expect(next).toHaveBeenCalledOnce();
+  });
+
+  it('uses the execution input namespace for task close signals', async () => {
+    const fs = await import('fs');
+    queue.enqueueTask('scheduled:t', 't', () => new Promise<void>(() => {}));
+    queue.registerProcess(
+      'scheduled:t',
+      {} as any,
+      'nanoclaw-t',
+      'main',
+      'main/executions/scheduled-t',
+    );
+    queue.closeStdin('scheduled:t');
+    expect(fs.default.writeFileSync).toHaveBeenCalledWith(
+      '/tmp/nanoclaw-test-data/ipc/main/executions/scheduled-t/input/_close',
+      '',
+    );
+  });
+  it('falls back to runtime kill when graceful stop fails', async () => {
+    const { exec, execFile } = await import('child_process');
+    vi.mocked(exec).mockImplementationOnce(((
+      _cmd: unknown,
+      _opts: unknown,
+      cb: (error: Error) => void,
+    ) => cb(new Error('stop timed out'))) as any);
+    let finish!: () => void;
+    queue.enqueueTask(
+      'job:1',
+      '1',
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    queue.registerProcess('job:1', {} as any, 'nanoclaw-test', 'main');
+    const cancellation = queue.cancel('job:1');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(execFile).toHaveBeenCalledWith(
+      'docker',
+      ['kill', 'nanoclaw-test'],
+      { timeout: 10_000 },
+      expect.any(Function),
+    );
+    finish();
+    await cancellation;
+  });
+
+  it('stops a process registered after cancellation started', async () => {
+    const { exec } = await import('child_process');
+    vi.mocked(exec).mockClear();
+    let finish!: () => void;
+    queue.enqueueTask(
+      'job:late',
+      'late',
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const cancellation = queue.cancel('job:late');
+    await vi.advanceTimersByTimeAsync(1);
+    queue.registerProcess('job:late', {} as any, 'nanoclaw-late', 'main');
+    expect(exec).toHaveBeenCalledWith(
+      'docker stop nanoclaw-late',
+      { timeout: 15_000 },
+      expect.any(Function),
+    );
+    finish();
+    await cancellation;
+  });
+
+  it('fails cancellation without releasing capacity when both runtime stop and kill fail', async () => {
+    const { exec, execFile } = await import('child_process');
+    vi.mocked(exec).mockImplementationOnce(((
+      _cmd: unknown,
+      _opts: unknown,
+      cb: (error: Error) => void,
+    ) => cb(new Error('stop failed'))) as any);
+    vi.mocked(execFile).mockImplementationOnce(((
+      _cmd: unknown,
+      _args: unknown,
+      _opts: unknown,
+      cb: (error: Error) => void,
+    ) => cb(new Error('kill failed'))) as any);
+    queue.enqueueTask('job:1', '1', () => new Promise<void>(() => {}));
+    queue.registerProcess('job:1', {} as any, 'nanoclaw-test', 'main');
+    await expect(queue.cancel('job:1')).rejects.toThrow('kill failed');
+    expect(queue.snapshot()[0]).toMatchObject({
+      active: true,
+      cancelling: true,
+    });
+    const next = vi.fn(async () => {});
+    queue.enqueueTask('job:2', '2', next);
+    expect(next).not.toHaveBeenCalled();
+  });
+  it('steers background work through its own input namespace', async () => {
+    const fs = await import('fs');
+    queue.enqueueTask('job:1', '1', () => new Promise<void>(() => {}));
+    queue.registerProcess(
+      'job:1',
+      {} as any,
+      'nanoclaw-test',
+      'main',
+      'main/executions/job-1',
+    );
+    expect(queue.sendMessage('job:1', 'normal message')).toBe(false);
+    expect(queue.steerTask('job:1', 'change focus')).toBe(true);
+    expect(fs.default.renameSync).toHaveBeenCalledWith(
+      expect.stringContaining('/main/executions/job-1/input/'),
+      expect.stringContaining('/main/executions/job-1/input/'),
+    );
+    queue.setProcessMessagesFn(() => new Promise(() => {}));
+    queue.enqueueMessageCheck('chat');
+    queue.registerProcess('chat', {} as any, 'nanoclaw-chat', 'main');
+    expect(queue.steerTask('chat', 'change focus')).toBe(false);
   });
 });

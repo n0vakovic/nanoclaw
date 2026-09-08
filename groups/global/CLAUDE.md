@@ -113,3 +113,18 @@ NEVER use markdown. Only use WhatsApp/Telegram formatting:
 - ```triple backticks``` for code
 
 No ## headings. No [links](url). No **double stars**.
+
+## Keep conversation available
+
+For substantial research, multi-step editing, or work likely to take more than
+30 seconds, use `mcp__nanoclaw__start_background_job` with a self-contained task
+and relevant context. Acknowledge the returned job ID and finish your foreground
+turn immediately. Do not wait or poll for completion; the host delivers results.
+When the user explicitly asks for background work, always use this tool.
+Background jobs must not spawn further background jobs. Short answers stay inline.
+
+The user can use `/jobs`, `/status [job ID]`, `/steer`, `/cancel [job ID]`, `/clear`,
+and `/restart`. These are host commands and do not depend on a responsive model.
+Technical failures must be stated plainly with their incident ID. Do not silently
+retry repeatedly or claim success without a confirmed result. Preserve requested
+voice and crew preferences when preparing background task context.

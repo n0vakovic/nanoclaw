@@ -443,7 +443,17 @@ function summarizeSessionLine(line: string, lineNumber: number): unknown {
 
 /* ------------------------------------------------------------------ */
 
+let backgroundJobAction: ActionHandler | undefined;
+export function configureBackgroundJobs(handler: ActionHandler): void {
+  backgroundJobAction = handler;
+}
+
 const ACTION_REGISTRY: Record<string, ActionHandler> = {
+  backgroundJob: async (params, ctx) => {
+    if (!backgroundJobAction || !ctx?.sourceGroup)
+      throw new Error('Background jobs are unavailable');
+    return backgroundJobAction(params, ctx);
+  },
   googleCalendarList: async (params, ctx) =>
     googleCalendarList(params || {}, googleContext(ctx).sourceGroup),
 

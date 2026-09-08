@@ -1,0 +1,9 @@
+[Unit]
+Description=NanoClaw independent recovery check
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/coding/_third_party/nanoclaw
+ExecStart=/usr/bin/node %h/coding/_third_party/nanoclaw/scripts/recovery-supervisor.mjs
+TimeoutStartSec=45
+UMask=0077

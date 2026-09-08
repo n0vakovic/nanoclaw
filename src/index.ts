@@ -9,6 +9,7 @@ import {
   POLL_INTERVAL,
   TIMEZONE,
   TRIGGER_PATTERN,
+  STORE_DIR,
 } from './config.js';
 import { startCredentialProxy } from './credential-proxy.js';
 import './channels/index.js';
@@ -23,11 +24,8 @@ import {
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
-import {
-  cleanupOrphans,
-  ensureContainerRuntimeRunning,
-  PROXY_BIND_HOST,
-} from './container-runtime.js';
+import { PROXY_BIND_HOST } from './container-runtime.js';
+import { checkDocker, reconcileContainers } from './runtime-health.js';
 import {
   getAllChats,
   getAllRegisteredGroups,
@@ -67,6 +65,15 @@ import {
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
+import { JobManager } from './job-manager.js';
+import { configureBackgroundJobs } from './host-actions.js';
+import { CONTROL_COMMANDS, handleControlCommand } from './control.js';
+import {
+  captureIncident,
+  readBuildIdentity,
+  writeHeartbeat,
+  RecoverySnapshot,
+} from './recovery.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -84,6 +91,125 @@ let messageLoopRunning = false;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
+let jobs: JobManager;
+let runtimeReady = false;
+let runtimeFailure: string | undefined;
+const recoveryEpoch = new Map<string, number>();
+const activity = new Map<string, { phase: string; at: string }>();
+
+function recoverySnapshot(jid?: string): RecoverySnapshot {
+  return {
+    groupJid: jid,
+    sessionId: jid ? sessions[registeredGroups[jid]?.folder] : undefined,
+    messageCursor: jid ? lastAgentTimestamp[jid] : undefined,
+    phase: jid
+      ? activity.get(jid)?.phase
+      : runtimeReady
+        ? 'ready'
+        : 'runtime_unavailable',
+    uptimeSeconds: process.uptime(),
+    activeContainers: queue.snapshot().filter((s) => s.active).length,
+    queue: queue.snapshot().map((s) => ({
+      groupJid: s.groupJid,
+      active: s.active,
+      pendingMessages: s.pendingMessages,
+      pendingTasks: s.pendingTasks.length,
+      containerName: s.containerName || undefined,
+      runningTaskId: s.runningTaskId || undefined,
+      cancelling: s.cancelling,
+      startedAt: s.startedAt || undefined,
+      lastProgressAt:
+        activity.get(s.groupJid)?.at || s.lastProgressAt || undefined,
+    })),
+  };
+}
+
+async function sendStrict(jid: string, text: string): Promise<void> {
+  const channel = findChannel(channels, jid);
+  if (!channel) throw new Error('Channel unavailable');
+  await (channel.sendMessageStrict?.(jid, text) ??
+    channel.sendMessage(jid, text));
+}
+
+function setupBackgroundJobs(): void {
+  jobs = new JobManager(path.join(STORE_DIR, 'agent-jobs.db'), {
+    groups: () => registeredGroups,
+    enqueue: (key, id, fn) => queue.enqueueTask(key, id, fn),
+    cancel: (key) => queue.cancel(key),
+    steer: (key, text) => queue.steerTask(key, text),
+    send: sendStrict,
+    incident: (reason, job) =>
+      captureIncident(reason, {
+        ...recoverySnapshot(job.chat_jid),
+        phase: job.phase,
+        messageId: job.id,
+        sessionId: undefined,
+      }),
+    run: async (job, group, progress) => {
+      if (!runtimeReady) throw new Error('Container runtime unavailable');
+      let result = '';
+      let failure = false;
+      const key = `job:${job.id}`;
+      const output = await runContainerAgent(
+        group,
+        {
+          prompt: `You are executing detached job ${job.id}. Complete the task and return the final result. Do not start another background job or wait for the foreground agent.\n\n${job.task}`,
+          groupFolder: group.folder,
+          chatJid: job.chat_jid,
+          isMain: group.isMain === true,
+          executionId: job.id,
+          isScheduledTask: true,
+          assistantName: ASSISTANT_NAME,
+        },
+        (proc, name) =>
+          queue.registerProcess(
+            key,
+            proc,
+            name,
+            group.folder,
+            `${group.folder}/executions/${job.id}`,
+          ),
+        async (event) => {
+          if (event.result)
+            result = (result + '\n' + event.result).trim().slice(0, 64000);
+          if (event.status === 'error') failure = true;
+          if (event.completed || event.result || event.status === 'error')
+            queue.closeStdin(key);
+        },
+        progress,
+      );
+      if (output.status === 'error' || failure)
+        throw new Error('Detached execution failed');
+      return result || output.result || 'Job completed without a text result.';
+    },
+  });
+  configureBackgroundJobs(async (params, ctx) => {
+    if (!ctx?.sourceGroup || !params) throw new Error('Missing job context');
+    const op = params.op;
+    if (op === 'start') {
+      if (!runtimeReady)
+        throw new Error(
+          'Docker unavailable; use /status. Your request has not been started.',
+        );
+      const task = typeof params.task === 'string' ? params.task : '';
+      const job = jobs.start(ctx.sourceGroup, ctx.requestId!, task);
+      return JSON.stringify({
+        id: job.id,
+        state: job.state,
+        instruction:
+          'Acknowledge this ID and end the foreground turn. The result will be delivered separately.',
+      });
+    }
+    if (op === 'list') return JSON.stringify(jobs.list(ctx.sourceGroup));
+    if (typeof params.id !== 'string') throw new Error('Missing job ID');
+    if (op === 'get')
+      return JSON.stringify(jobs.get(ctx.sourceGroup, params.id));
+    if (op === 'cancel') return jobs.cancel(ctx.sourceGroup, params.id);
+    if (op === 'steer' && typeof params.instruction === 'string')
+      return jobs.steer(ctx.sourceGroup, params.id, params.instruction);
+    throw new Error('Unknown job operation');
+  });
+}
 
 function loadState(): void {
   lastTimestamp = getRouterState('last_timestamp') || '';
@@ -177,6 +303,8 @@ export function _setRegisteredGroups(
  * Called by the GroupQueue when it's this group's turn.
  */
 async function processGroupMessages(chatJid: string): Promise<boolean> {
+  if (!runtimeReady) return true; // Durable inbound history is retried when runtime recovers.
+  const epoch = recoveryEpoch.get(chatJid) || 0;
   const group = registeredGroups[chatJid];
   if (!group) return true;
 
@@ -241,6 +369,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let outputSentToUser = false;
 
   const output = await runAgent(group, prompt, chatJid, async (result) => {
+    if ((recoveryEpoch.get(chatJid) || 0) !== epoch) return;
     // Streaming output callback — called for each agent result
     if (result.result) {
       const raw =
@@ -258,7 +387,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       resetIdleTimer();
     }
 
-    if (result.status === 'success') {
+    if (result.status === 'success' && (result.completed || result.result)) {
       // A container query fully completed, so everything piped up to now has
       // been processed — safe to confirm. Crash recovery keys off this.
       lastConfirmedTimestamp[chatJid] = lastAgentTimestamp[chatJid] || '';
@@ -274,7 +403,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
 
+  if ((recoveryEpoch.get(chatJid) || 0) !== epoch) return true;
+
   if (output === 'error' || hadError) {
+    const incident = captureIncident('foreground_failed', {
+      ...recoverySnapshot(chatJid),
+      messageId: missedMessages[missedMessages.length - 1].id,
+    });
+    await sendStrict(
+      chatJid,
+      `I couldn't complete that turn. Incident ${incident}. Use /status to inspect, /cancel to stop retries, or /clear for a fresh session.`,
+    ).catch((err) =>
+      logger.warn({ err, incident }, 'Failure notice delivery failed'),
+    );
     // If we already sent output to the user, don't roll back the cursor —
     // the user got their response and re-processing would send duplicates.
     if (outputSentToUser) {
@@ -305,6 +446,7 @@ async function runAgent(
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
   const sessionId = sessions[group.folder];
+  const epoch = recoveryEpoch.get(chatJid) || 0;
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -337,6 +479,7 @@ async function runAgent(
   // Wrap onOutput to track session ID from streamed results
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
+        if ((recoveryEpoch.get(chatJid) || 0) !== epoch) return;
         if (output.newSessionId) {
           sessions[group.folder] = output.newSessionId;
           setSession(group.folder, output.newSessionId);
@@ -359,9 +502,10 @@ async function runAgent(
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
       wrappedOnOutput,
+      (phase) => activity.set(chatJid, { phase, at: new Date().toISOString() }),
     );
 
-    if (output.newSessionId) {
+    if (output.newSessionId && (recoveryEpoch.get(chatJid) || 0) === epoch) {
       sessions[group.folder] = output.newSessionId;
       setSession(group.folder, output.newSessionId);
     }
@@ -729,17 +873,27 @@ function recoverPendingMessages(): void {
   }
 }
 
-function ensureContainerSystemRunning(): void {
-  ensureContainerRuntimeRunning();
-  cleanupOrphans();
-}
-
 async function main(): Promise<void> {
-  ensureContainerSystemRunning();
+  try {
+    await checkDocker();
+    await reconcileContainers();
+    runtimeReady = true;
+  } catch {
+    runtimeFailure = captureIncident('runtime_unavailable', {
+      phase: 'startup',
+      errorCode: 'DOCKER_UNAVAILABLE',
+    });
+    logger.error(
+      { incident: runtimeFailure },
+      'Docker unavailable; starting Telegram recovery controls in degraded mode',
+    );
+  }
   initDatabase();
   logger.info('Database initialized');
   loadState();
   restoreRemoteControl();
+  setupBackgroundJobs();
+  let jobsRecovered = false;
 
   // Start credential proxy (containers route API calls through this)
   const proxyServer = await startCredentialProxy(
@@ -748,16 +902,98 @@ async function main(): Promise<void> {
   );
 
   // Graceful shutdown handlers
+  let shuttingDown = false;
   const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
     logger.info({ signal }, 'Shutdown signal received');
+    captureIncident('service_shutdown', recoverySnapshot());
+    shuttingDown = true;
+    runtimeReady = false;
+    // A broken provider/channel must not defeat the owner's recovery command.
+    // Running jobs remain persisted and are reconciled as interrupted next boot.
+    setTimeout(() => process.exit(0), 15000).unref();
     proxyServer.close();
     await queue.shutdown(10000);
-    await waitForGoogleExecutions();
+    await waitForGoogleExecutions(10000);
     for (const ch of channels) await ch.disconnect();
     process.exit(0);
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
+
+  const controlDeps = {
+    groups: () => registeredGroups,
+    status: (jid: string, id?: string) => {
+      const group = registeredGroups[jid];
+      if (id) {
+        const job = jobs.get(group.folder, id);
+        return `${job.id} · ${job.state} · ${job.phase}\nLast activity: ${job.updated_at}\nDelivery: ${job.delivery}${job.incident_id ? '\nIncident: ' + job.incident_id : ''}${job.result ? '\n' + job.result.slice(0, 3000) : ''}`;
+      }
+      const build = readBuildIdentity();
+      const lanes = queue
+        .snapshot()
+        .filter((s) => group.isMain || s.groupJid === jid);
+      return (
+        `NanoClaw ${build.sha.slice(0, 12)} · ${build.branch}${build.dirty ? ' (uncommitted build)' : ''}\nDocker: ${runtimeReady ? 'ready' : 'unavailable'}${runtimeFailure ? '\nRuntime incident: ' + runtimeFailure : ''}\n` +
+        (lanes.length
+          ? lanes
+              .slice(0, 15)
+              .map(
+                (s) =>
+                  `${s.groupJid}: ${s.cancelling ? 'cancelling' : s.active ? 'running' : 'idle'}; ${s.pendingTasks.length} queued tasks; messages ${s.pendingMessages ? 'waiting' : 'clear'}${activity.get(s.groupJid) ? '; ' + activity.get(s.groupJid)!.phase + ' at ' + activity.get(s.groupJid)!.at : ''}`,
+              )
+              .join('\n')
+          : 'No active work.')
+      );
+    },
+    jobs: (source: string) =>
+      jobs
+        .list(source)
+        .map((j) => `${j.id} · ${j.state} · ${j.phase} · ${j.updated_at}`)
+        .join('\n') || 'No background jobs.',
+    cancelJob: (source: string, id: string) => jobs.cancel(source, id),
+    steerJob: (source: string, id: string, text: string) =>
+      jobs.steer(source, id, text),
+    capture: (reason: string, jid: string, msg: NewMessage) =>
+      captureIncident(reason, { ...recoverySnapshot(jid), messageId: msg.id }),
+    reset: async (jid: string, clear: boolean, msg: NewMessage) => {
+      recoveryEpoch.set(jid, (recoveryEpoch.get(jid) || 0) + 1);
+      // Explicit cancellation acknowledges the interrupted batch without deleting its history.
+      // Advance before stop so completion callbacks/retry timers cannot resurrect it.
+      lastAgentTimestamp[jid] = msg.timestamp;
+      lastConfirmedTimestamp[jid] = msg.timestamp;
+      saveState();
+      await queue.cancel(jid);
+      const inputDir = path.join(
+        resolveGroupIpcPath(registeredGroups[jid].folder),
+        'input',
+      );
+      if (fs.existsSync(inputDir)) {
+        const archived = `${inputDir}-cancelled-${Date.now()}`;
+        fs.renameSync(inputDir, archived);
+        fs.mkdirSync(inputDir, { recursive: true });
+      }
+      if (clear) {
+        delete sessions[registeredGroups[jid].folder];
+        setSession(registeredGroups[jid].folder, '');
+      }
+      activity.set(jid, {
+        phase: clear ? 'cleared' : 'cancelled',
+        at: new Date().toISOString(),
+      });
+    },
+    restart: () => {
+      void (async () => {
+        // Explicit restart must not replay foreground side effects on startup.
+        for (const jid of Object.keys(registeredGroups)) {
+          recoveryEpoch.set(jid, (recoveryEpoch.get(jid) || 0) + 1);
+          lastConfirmedTimestamp[jid] = lastAgentTimestamp[jid] || '';
+        }
+        saveState();
+        await shutdown('owner_restart');
+      })().catch((err) => logger.error({ err }, 'Owner restart failed'));
+    },
+  };
 
   // Handle /remote-control and /remote-control-end commands
   async function handleRemoteControl(
@@ -803,6 +1039,21 @@ async function main(): Promise<void> {
 
   // Channel callbacks (shared by all channels)
   const channelOpts = {
+    onFatal: (error: unknown) => {
+      logger.fatal(
+        { error },
+        'Channel polling stopped; restarting to preserve incoming delivery',
+      );
+      try {
+        captureIncident('channel_polling_failed', {
+          phase: 'telegram_ingress',
+          errorCode: 'POLLING_STOPPED',
+        });
+      } catch {
+        /* Disk failure is precisely why polling must stop without acknowledgment. */
+      }
+      process.exit(1);
+    },
     onMessage: (chatJid: string, msg: NewMessage) => {
       // Remote control commands — intercept before storage
       const trimmed = msg.content.trim();
@@ -830,6 +1081,12 @@ async function main(): Promise<void> {
         }
       }
       storeMessage(msg);
+      if (!runtimeReady && registeredGroups[chatJid]) {
+        void sendStrict(
+          chatJid,
+          `Your message is saved. Docker is unavailable, so I cannot run the agent yet. /status and recovery commands still work.${runtimeFailure ? ' Incident ' + runtimeFailure : ''}`,
+        ).catch((err) => logger.warn({ err }, 'Degraded notice failed'));
+      }
     },
     onHostCommand: async (
       command: string,
@@ -837,6 +1094,8 @@ async function main(): Promise<void> {
       chatJid: string,
       msg: NewMessage,
     ) => {
+      if (CONTROL_COMMANDS.includes(command))
+        return handleControlCommand(controlDeps, command, args, chatJid, msg);
       if (command !== 'approve' && command !== 'reject') {
         throw new Error(`Unsupported host command /${command}`);
       }
@@ -890,6 +1149,46 @@ async function main(): Promise<void> {
     logger.fatal('No channels connected');
     process.exit(1);
   }
+  const beat = () => {
+    try {
+      writeHeartbeat(recoverySnapshot());
+    } catch (err) {
+      logger.error({ err }, 'Heartbeat write failed');
+    }
+  };
+  beat();
+  setInterval(beat, 10000);
+  let checkingRuntime = false;
+  const checkRuntime = async () => {
+    if (checkingRuntime || shuttingDown) return;
+    checkingRuntime = true;
+    const wasReady = runtimeReady;
+    try {
+      await checkDocker();
+      if (shuttingDown) return;
+      if (!wasReady) await reconcileContainers();
+      runtimeReady = true;
+      if (!wasReady) {
+        runtimeFailure = undefined;
+        recoverPendingMessages();
+      }
+      if (!jobsRecovered) {
+        jobsRecovered = true;
+        await jobs.recover();
+      }
+    } catch {
+      runtimeReady = false;
+      if (wasReady)
+        runtimeFailure = captureIncident('runtime_unavailable', {
+          phase: 'runtime_check',
+          errorCode: 'DOCKER_UNAVAILABLE',
+        });
+    } finally {
+      checkingRuntime = false;
+    }
+  };
+  void checkRuntime();
+  setInterval(checkRuntime, 30000);
   recoverGoogleApprovalWork(resolveGroupIpcPath, async (targetJid, text) => {
     const targetChannel = findChannel(channels, targetJid);
     if (!targetChannel) {
@@ -904,6 +1203,7 @@ async function main(): Promise<void> {
 
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
+    runtimeReady: () => runtimeReady,
     registeredGroups: () => registeredGroups,
     getSessions: () => sessions,
     queue,

@@ -38,6 +38,7 @@ const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 export interface ContainerInput {
   prompt: string;
   sessionId?: string;
+  executionId?: string;
   groupFolder: string;
   chatJid: string;
   isMain: boolean;
@@ -45,8 +46,25 @@ export interface ContainerInput {
   assistantName?: string;
 }
 
+export type ContainerActivityPhase =
+  | 'starting'
+  | 'model'
+  | 'tool'
+  | 'result'
+  | 'idle'
+  | 'exited';
+const ACTIVITY_PHASES = new Set<string>([
+  'starting',
+  'model',
+  'tool',
+  'result',
+  'idle',
+  'exited',
+]);
+
 export interface ContainerOutput {
   status: 'success' | 'error';
+  completed?: boolean;
   result: string | null;
   newSessionId?: string;
   error?: string;
@@ -61,6 +79,7 @@ interface VolumeMount {
 function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
+  executionId?: string,
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
   const projectRoot = process.cwd();
@@ -125,12 +144,10 @@ function buildVolumeMounts(
 
   // Per-group Claude sessions directory (isolated from other groups)
   // Each group gets their own .claude/ to prevent cross-group session access
-  const groupSessionsDir = path.join(
-    DATA_DIR,
-    'sessions',
-    group.folder,
-    '.claude',
-  );
+  const executionRoot = executionId
+    ? path.join(DATA_DIR, 'executions', executionId)
+    : path.join(DATA_DIR, 'sessions', group.folder);
+  const groupSessionsDir = path.join(executionRoot, '.claude');
   fs.mkdirSync(groupSessionsDir, { recursive: true });
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
   if (!fs.existsSync(settingsFile)) {
@@ -188,6 +205,16 @@ function buildVolumeMounts(
     readonly: false,
   });
 
+  if (executionId) {
+    const inputDir = path.join(groupIpcDir, 'executions', executionId, 'input');
+    fs.mkdirSync(inputDir, { recursive: true });
+    mounts.push({
+      hostPath: inputDir,
+      containerPath: '/workspace/ipc/input',
+      readonly: false,
+    });
+  }
+
   // Copy agent-runner source into a per-group writable location so agents
   // can customize it (add tools, change behavior) without affecting other
   // groups. Recompiled on container startup via entrypoint.sh.
@@ -197,12 +224,7 @@ function buildVolumeMounts(
     'agent-runner',
     'src',
   );
-  const groupAgentRunnerDir = path.join(
-    DATA_DIR,
-    'sessions',
-    group.folder,
-    'agent-runner-src',
-  );
+  const groupAgentRunnerDir = path.join(executionRoot, 'agent-runner-src');
   if (fs.existsSync(agentRunnerSrc)) {
     fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
   }
@@ -283,7 +305,11 @@ function buildContainerArgs(
   // or when getuid is unavailable (native Windows without WSL).
   const hostUid = process.getuid?.();
   const hostGid = process.getgid?.();
-  if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
+  if (process.env.NANOCLAW_ROOTLESS === '1') {
+    // Root inside a rootless user namespace maps to the unprivileged host owner.
+    // UID 1000 inside would map to a subordinate UID and lose bind-mount access.
+    args.push('--user', '0:0', '-e', 'HOME=/home/node', '-e', 'IS_SANDBOX=1');
+  } else if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
     args.push('--user', `${hostUid}:${hostGid}`);
     args.push('-e', 'HOME=/home/node');
   }
@@ -306,16 +332,55 @@ export async function runContainerAgent(
   input: ContainerInput,
   onProcess: (proc: ChildProcess, containerName: string) => void,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  onActivity?: (phase: ContainerActivityPhase) => void,
 ): Promise<ContainerOutput> {
+  if (
+    input.executionId !== undefined &&
+    (!/^[A-Za-z0-9_-]{1,100}$/.test(input.executionId) ||
+      input.sessionId !== undefined)
+  ) {
+    throw new Error(
+      'Invalid execution ID or execution cannot resume a foreground session',
+    );
+  }
+  if (input.groupFolder !== group.folder)
+    throw new Error('Container input group does not match registered group');
+  const activity = (phase: ContainerActivityPhase) => {
+    try {
+      onActivity?.(phase);
+    } catch {
+      logger.warn({ group: group.name }, 'Activity callback failed');
+    }
+  };
   const startTime = Date.now();
 
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  const mounts = buildVolumeMounts(group, input.isMain);
+  const mounts = buildVolumeMounts(group, input.isMain, input.executionId);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
-  const containerName = `nanoclaw-${safeName}-${Date.now()}`;
+  const containerName = `nanoclaw-${safeName}-${input.executionId || Date.now()}`;
   const containerArgs = buildContainerArgs(mounts, containerName);
+
+  const secretValues = Object.values(
+    readEnvFile([
+      'TODOIST_API_KEY',
+      'ANTHROPIC_API_KEY',
+      'CLAUDE_CODE_OAUTH_TOKEN',
+      'OPENAI_API_KEY',
+      'TELEGRAM_BOT_TOKEN',
+    ]),
+  ).filter((value): value is string => Boolean(value));
+  const redact = (text: string) =>
+    secretValues.reduce(
+      (value, secret) => value.split(secret).join('[REDACTED]'),
+      text,
+    );
+  const safeArgs = containerArgs
+    .map((arg, i) =>
+      containerArgs[i - 1] === '-e' ? `${arg.split('=')[0]}=[REDACTED]` : arg,
+    )
+    .join(' ');
 
   logger.debug(
     {
@@ -325,7 +390,7 @@ export async function runContainerAgent(
         (m) =>
           `${m.hostPath} -> ${m.containerPath}${m.readonly ? ' (ro)' : ''}`,
       ),
-      containerArgs: containerArgs.join(' '),
+      containerArgs: safeArgs,
     },
     'Container mount configuration',
   );
@@ -349,6 +414,7 @@ export async function runContainerAgent(
     });
 
     onProcess(container, containerName);
+    activity('starting');
 
     let stdout = '';
     let stderr = '';
@@ -362,6 +428,8 @@ export async function runContainerAgent(
     let parseBuffer = '';
     let newSessionId: string | undefined;
     let outputChain = Promise.resolve();
+    let callbackError: string | undefined;
+    let lastOutput: ContainerOutput | undefined;
 
     container.stdout.on('data', (data) => {
       const chunk = data.toString();
@@ -381,42 +449,76 @@ export async function runContainerAgent(
         }
       }
 
-      // Stream-parse for output markers
-      if (onOutput) {
-        parseBuffer += chunk;
-        let startIdx: number;
-        while ((startIdx = parseBuffer.indexOf(OUTPUT_START_MARKER)) !== -1) {
-          const endIdx = parseBuffer.indexOf(OUTPUT_END_MARKER, startIdx);
-          if (endIdx === -1) break; // Incomplete pair, wait for more data
-
-          const jsonStr = parseBuffer
-            .slice(startIdx + OUTPUT_START_MARKER.length, endIdx)
-            .trim();
-          parseBuffer = parseBuffer.slice(endIdx + OUTPUT_END_MARKER.length);
-
-          try {
-            const parsed: ContainerOutput = JSON.parse(jsonStr);
-            if (parsed.newSessionId) {
-              newSessionId = parsed.newSessionId;
+      // Parse independently of response delivery: progress never confirms a turn.
+      parseBuffer += chunk;
+      while (true) {
+        const startIdx = parseBuffer.indexOf(OUTPUT_START_MARKER);
+        if (startIdx === -1) {
+          parseBuffer = parseBuffer.slice(-(OUTPUT_START_MARKER.length - 1));
+          break;
+        }
+        if (startIdx > 0) parseBuffer = parseBuffer.slice(startIdx);
+        const endIdx = parseBuffer.indexOf(
+          OUTPUT_END_MARKER,
+          OUTPUT_START_MARKER.length,
+        );
+        if (endIdx === -1) {
+          if (parseBuffer.length > CONTAINER_MAX_OUTPUT_SIZE) parseBuffer = '';
+          break;
+        }
+        const jsonStr = parseBuffer
+          .slice(OUTPUT_START_MARKER.length, endIdx)
+          .trim();
+        parseBuffer = parseBuffer.slice(endIdx + OUTPUT_END_MARKER.length);
+        if (jsonStr.length > CONTAINER_MAX_OUTPUT_SIZE) continue;
+        try {
+          const parsed = JSON.parse(jsonStr);
+          if (parsed.type === 'progress') {
+            if (ACTIVITY_PHASES.has(parsed.phase)) {
+              if (typeof parsed.newSessionId === 'string')
+                newSessionId = parsed.newSessionId;
+              activity(parsed.phase);
+              if (parsed.phase !== 'idle' && parsed.phase !== 'exited') {
+                hadStreamingOutput = false;
+                resetTimeout();
+              }
             }
-            hadStreamingOutput = true;
-            // Activity detected — reset the hard timeout
-            resetTimeout();
-            // Call onOutput for all markers (including null results)
-            // so idle timers start even for "silent" query completions.
-            outputChain = outputChain.then(() => onOutput(parsed));
-          } catch (err) {
-            logger.warn(
-              { group: group.name, error: err },
-              'Failed to parse streamed output chunk',
-            );
+            continue;
           }
+          if (
+            !['success', 'error'].includes(parsed.status) ||
+            !(parsed.result === null || typeof parsed.result === 'string')
+          )
+            continue;
+          if (typeof parsed.newSessionId === 'string')
+            newSessionId = parsed.newSessionId;
+          lastOutput = parsed;
+          hadStreamingOutput =
+            parsed.status === 'success' &&
+            (parsed.completed === true || parsed.result !== null);
+          resetTimeout();
+          if (onOutput) {
+            outputChain = outputChain
+              .then(async () => {
+                if (!callbackError) await onOutput(parsed);
+              })
+              .catch((err: unknown) => {
+                callbackError = redact(
+                  err instanceof Error ? err.message : String(err),
+                );
+              });
+          }
+        } catch {
+          logger.warn(
+            { group: group.name },
+            'Failed to parse streamed output chunk',
+          );
         }
       }
     });
 
     container.stderr.on('data', (data) => {
-      const chunk = data.toString();
+      const chunk = redact(data.toString());
       const lines = chunk.trim().split('\n');
       for (const line of lines) {
         if (line) logger.debug({ container: group.folder }, line);
@@ -469,8 +571,18 @@ export async function runContainerAgent(
       timeout = setTimeout(killOnTimeout, timeoutMs);
     };
 
-    container.on('close', (code) => {
+    container.on('close', async (code) => {
       clearTimeout(timeout);
+      activity('exited');
+      await outputChain;
+      if (callbackError) {
+        resolve({
+          status: 'error',
+          result: null,
+          error: `Output callback failed: ${callbackError}`,
+        });
+        return;
+      }
       const duration = Date.now() - startTime;
 
       if (timedOut) {
@@ -515,7 +627,7 @@ export async function runContainerAgent(
         resolve({
           status: 'error',
           result: null,
-          error: `Container timed out after ${configTimeout}ms`,
+          error: `Container timed out after ${timeoutMs}ms`,
         });
         return;
       }
@@ -545,7 +657,7 @@ export async function runContainerAgent(
           JSON.stringify(input, null, 2),
           ``,
           `=== Container Args ===`,
-          containerArgs.join(' '),
+          safeArgs,
           ``,
           `=== Mounts ===`,
           mounts
@@ -575,7 +687,7 @@ export async function runContainerAgent(
         );
       }
 
-      fs.writeFileSync(logFile, logLines.join('\n'));
+      fs.writeFileSync(logFile, redact(logLines.join('\n')));
       logger.debug({ logFile, verbose: isVerbose }, 'Container log written');
 
       if (code !== 0) {
@@ -584,8 +696,8 @@ export async function runContainerAgent(
             group: group.name,
             code,
             duration,
-            stderr,
-            stdout,
+            stderr: redact(stderr),
+            stdout: redact(stdout),
             logFile,
           },
           'Container exited with error',
@@ -599,8 +711,13 @@ export async function runContainerAgent(
         return;
       }
 
+      if (lastOutput?.status === 'error') {
+        resolve(lastOutput);
+        return;
+      }
+
       // Streaming mode: wait for output chain to settle, return completion marker
-      if (onOutput) {
+      if (onOutput && lastOutput) {
         outputChain.then(() => {
           logger.info(
             { group: group.name, duration, newSessionId },
@@ -612,6 +729,11 @@ export async function runContainerAgent(
             newSessionId,
           });
         });
+        return;
+      }
+
+      if (lastOutput) {
+        resolve(lastOutput);
         return;
       }
 
@@ -633,6 +755,13 @@ export async function runContainerAgent(
         }
 
         const output: ContainerOutput = JSON.parse(jsonLine);
+        if (
+          !output ||
+          !['success', 'error'].includes(output.status) ||
+          !(output.result === null || typeof output.result === 'string')
+        ) {
+          throw new Error('Container exited without a result');
+        }
 
         logger.info(
           {
@@ -649,9 +778,9 @@ export async function runContainerAgent(
         logger.error(
           {
             group: group.name,
-            stdout,
-            stderr,
-            error: err,
+            stdout: redact(stdout),
+            stderr: redact(stderr),
+            error: redact(err instanceof Error ? err.message : String(err)),
           },
           'Failed to parse container output',
         );
@@ -659,7 +788,7 @@ export async function runContainerAgent(
         resolve({
           status: 'error',
           result: null,
-          error: `Failed to parse container output: ${err instanceof Error ? err.message : String(err)}`,
+          error: `Failed to parse container output: ${redact(err instanceof Error ? err.message : String(err))}`,
         });
       }
     });

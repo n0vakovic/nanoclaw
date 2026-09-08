@@ -7,6 +7,7 @@ import {
 } from '../types.js';
 
 export interface ChannelOpts {
+  onFatal?: (error: unknown) => void;
   onMessage: OnInboundMessage;
   onHostCommand?: OnHostCommand;
   onChatMetadata: OnChatMetadata;

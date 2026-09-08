@@ -122,6 +122,7 @@ export type OnInboundMessage = (chatJid: string, message: NewMessage) => void;
 
 export interface ChannelCommandResult {
   reply: string;
+  afterReply?: () => void;
 }
 
 // Commands that must be authorized and executed by the host (rather than

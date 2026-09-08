@@ -26,6 +26,7 @@ import { fileURLToPath } from 'url';
 interface ContainerInput {
   prompt: string;
   sessionId?: string;
+  executionId?: string;
   groupFolder: string;
   chatJid: string;
   isMain: boolean;
@@ -34,6 +35,7 @@ interface ContainerInput {
 }
 
 interface ContainerOutput {
+  completed?: boolean;
   status: 'success' | 'error';
   result: string | null;
   newSessionId?: string;
@@ -115,7 +117,15 @@ async function readStdin(): Promise<string> {
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
-function writeOutput(output: ContainerOutput): void {
+function writeOutput(
+  output:
+    | ContainerOutput
+    | {
+        type: 'progress';
+        phase: 'starting' | 'model' | 'tool' | 'result' | 'idle' | 'exited';
+        newSessionId?: string;
+      },
+): void {
   console.log(OUTPUT_START_MARKER);
   console.log(JSON.stringify(output));
   console.log(OUTPUT_END_MARKER);
@@ -393,6 +403,7 @@ async function runQuery(
   lastAssistantUuid?: string;
   closedDuringQuery: boolean;
 }> {
+  const abortController = new AbortController();
   const stream = new MessageStream();
   stream.push(prompt);
 
@@ -401,6 +412,14 @@ async function runQuery(
   let closedDuringQuery = false;
   const pollIpcDuringQuery = () => {
     if (!ipcPolling) return;
+    if (fs.existsSync(path.join(IPC_INPUT_DIR, '_abort'))) {
+      fs.unlinkSync(path.join(IPC_INPUT_DIR, '_abort'));
+      closedDuringQuery = true;
+      stream.end();
+      ipcPolling = false;
+      abortController.abort();
+      return;
+    }
     if (shouldClose()) {
       log('Close sentinel detected during query, ending stream');
       closedDuringQuery = true;
@@ -446,126 +465,147 @@ async function runQuery(
     log(`Additional directories: ${extraDirs.join(', ')}`);
   }
 
-  for await (const message of query({
-    prompt: stream,
-    options: {
-      model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
-      cwd: '/workspace/group',
-      additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
-      resume: sessionId,
-      resumeSessionAt: resumeAt,
-      systemPrompt: globalClaudeMd
-        ? {
-            type: 'preset' as const,
-            preset: 'claude_code' as const,
-            append: globalClaudeMd,
-          }
-        : undefined,
-      allowedTools: [
-        'Bash',
-        'Read',
-        'Write',
-        'Edit',
-        'Glob',
-        'Grep',
-        'WebSearch',
-        'WebFetch',
-        'Task',
-        'TaskOutput',
-        'TaskStop',
-        'TeamCreate',
-        'TeamDelete',
-        'SendMessage',
-        'TodoWrite',
-        'ToolSearch',
-        'Skill',
-        'NotebookEdit',
-        'mcp__nanoclaw__*',
-        'mcp__todoist__*',
-      ],
-      env: sdkEnv,
-      permissionMode: 'bypassPermissions',
-      allowDangerouslySkipPermissions: true,
-      settingSources: ['project', 'user'],
-      mcpServers: {
-        nanoclaw: {
-          command: 'node',
-          args: [mcpServerPath],
-          env: {
-            NANOCLAW_CHAT_JID: containerInput.chatJid,
-            NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
-            NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
-          },
+  writeOutput({ type: 'progress', phase: 'model' });
+  try {
+    for await (const message of query({
+      prompt: stream,
+      options: {
+        abortController,
+        includePartialMessages: true,
+        model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
+        cwd: '/workspace/group',
+        additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
+        resume: sessionId,
+        resumeSessionAt: resumeAt,
+        systemPrompt: {
+          type: 'preset' as const,
+          preset: 'claude_code' as const,
+          append: [
+            globalClaudeMd || '',
+            containerInput.executionId
+              ? 'You are a detached worker. Finish the assigned task, return its result, and do not start another background job.'
+              : 'Keep the foreground conversation available. For research or multi-step tool work likely to take over 30 seconds, call mcp__nanoclaw__start_background_job with a self-contained task and context. Acknowledge the job ID and END this turn immediately. Never wait or poll for the job. Always use it when the user asks for background work. Short answers stay inline. Report technical failures plainly; do not silently retry repeatedly.',
+          ].join('\n\n'),
         },
-        ...(process.env.TODOIST_API_KEY
-          ? {
-              todoist: {
-                command: 'npx',
-                args: ['-y', '@doist/todoist-ai'],
-                env: { TODOIST_API_KEY: process.env.TODOIST_API_KEY },
-              },
-            }
-          : {}),
-      },
-      hooks: {
-        PreCompact: [
-          { hooks: [createPreCompactHook(containerInput.assistantName)] },
+        allowedTools: [
+          'Bash',
+          'Read',
+          'Write',
+          'Edit',
+          'Glob',
+          'Grep',
+          'WebSearch',
+          'WebFetch',
+          'Task',
+          'TaskOutput',
+          'TaskStop',
+          'TeamCreate',
+          'TeamDelete',
+          'SendMessage',
+          'TodoWrite',
+          'ToolSearch',
+          'Skill',
+          'NotebookEdit',
+          'mcp__nanoclaw__*',
+          'mcp__todoist__*',
         ],
+        env: sdkEnv,
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+        settingSources: ['project', 'user'],
+        mcpServers: {
+          nanoclaw: {
+            command: 'node',
+            args: [mcpServerPath],
+            env: {
+              NANOCLAW_CHAT_JID: containerInput.chatJid,
+              NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
+              NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+              NANOCLAW_EXECUTION_ID: containerInput.executionId || '',
+            },
+          },
+          ...(process.env.TODOIST_API_KEY
+            ? {
+                todoist: {
+                  command: 'npx',
+                  args: ['-y', '@doist/todoist-ai'],
+                  env: { TODOIST_API_KEY: process.env.TODOIST_API_KEY },
+                },
+              }
+            : {}),
+        },
+        hooks: {
+          PreCompact: [
+            { hooks: [createPreCompactHook(containerInput.assistantName)] },
+          ],
+        },
       },
-    },
-  })) {
-    messageCount++;
-    const msgType =
-      message.type === 'system'
-        ? `system/${(message as { subtype?: string }).subtype}`
-        : message.type;
-    log(`[msg #${messageCount}] type=${msgType}`);
+    })) {
+      messageCount++;
+      const msgType =
+        message.type === 'system'
+          ? `system/${(message as { subtype?: string }).subtype}`
+          : message.type;
+      log(`[msg #${messageCount}] type=${msgType}`);
 
-    if (message.type === 'assistant' && 'uuid' in message) {
-      lastAssistantUuid = (message as { uuid: string }).uuid;
-      const assistantText = extractAssistantText(message);
-      if (assistantText) {
-        pendingAssistantText = assistantText;
+      if (message.type === 'stream_event') {
+        const event = message.event;
+        if (event.type === 'content_block_start') {
+          writeOutput({
+            type: 'progress',
+            phase: event.content_block.type === 'tool_use' ? 'tool' : 'model',
+          });
+        }
+      }
+
+      if (message.type === 'assistant' && 'uuid' in message) {
+        lastAssistantUuid = (message as { uuid: string }).uuid;
+        const assistantText = extractAssistantText(message);
+        if (assistantText) {
+          pendingAssistantText = assistantText;
+        }
+      }
+
+      if (message.type === 'system' && message.subtype === 'init') {
+        newSessionId = message.session_id;
+        log(`Session initialized: ${newSessionId}`);
+        writeOutput({ type: 'progress', phase: 'model', newSessionId });
+      }
+
+      if (
+        message.type === 'system' &&
+        (message as { subtype?: string }).subtype === 'task_notification'
+      ) {
+        const tn = message as {
+          task_id: string;
+          status: string;
+          summary: string;
+        };
+        log(`Task notification: task=${tn.task_id} status=${tn.status} `);
+      }
+
+      if (message.type === 'result') {
+        resultCount++;
+        const textResult =
+          'result' in message ? (message as { result?: string }).result : null;
+        const resultText = textResult || pendingAssistantText;
+        log(`Result #${resultCount}: subtype=${message.subtype}`);
+        const failed = message.subtype !== 'success' || message.is_error;
+        writeOutput({ type: 'progress', phase: 'result' });
+        writeOutput({
+          status: failed ? 'error' : 'success',
+          completed: true,
+          ...(failed ? { error: resultText || 'Agent query failed' } : {}),
+          result: resultText || null,
+          newSessionId,
+        });
+        pendingAssistantText = null;
       }
     }
-
-    if (message.type === 'system' && message.subtype === 'init') {
-      newSessionId = message.session_id;
-      log(`Session initialized: ${newSessionId}`);
-    }
-
-    if (
-      message.type === 'system' &&
-      (message as { subtype?: string }).subtype === 'task_notification'
-    ) {
-      const tn = message as {
-        task_id: string;
-        status: string;
-        summary: string;
-      };
-      log(
-        `Task notification: task=${tn.task_id} status=${tn.status} summary=${tn.summary}`,
-      );
-    }
-
-    if (message.type === 'result') {
-      resultCount++;
-      const textResult =
-        'result' in message ? (message as { result?: string }).result : null;
-      const resultText = textResult || pendingAssistantText;
-      log(
-        `Result #${resultCount}: subtype=${message.subtype}${resultText ? ` text=${resultText.slice(0, 200)}` : ''}`,
-      );
-      writeOutput({
-        status: 'success',
-        result: resultText || null,
-        newSessionId,
-      });
-      pendingAssistantText = null;
-    }
+  } finally {
+    ipcPolling = false;
+    stream.end();
   }
-
-  ipcPolling = false;
   log(
     `Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}`,
   );
@@ -653,7 +693,8 @@ async function main(): Promise<void> {
       }
 
       // Emit session update so host can track it
-      writeOutput({ status: 'success', result: null, newSessionId: sessionId });
+      if (containerInput.executionId) break;
+      writeOutput({ type: 'progress', phase: 'idle', newSessionId: sessionId });
 
       log('Query ended, waiting for next IPC message...');
 

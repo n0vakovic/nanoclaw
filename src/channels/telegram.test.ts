@@ -12,6 +12,11 @@ const fsMock = vi.hoisted(() => ({
 }));
 vi.mock('fs', () => ({ default: fsMock }));
 
+vi.mock('../recovery.js', () => ({
+  recoveryStateDir: () => '/tmp/nanoclaw-telegram-test-recovery',
+  captureIncident: vi.fn(() => 'incident-test'),
+}));
+
 // Mock registry (registerChannel runs at import time)
 vi.mock('./registry.js', () => ({ registerChannel: vi.fn() }));
 
@@ -233,9 +238,18 @@ async function triggerMediaMessage(
 
 // --- Tests ---
 
+const connectedChannels = new Set<TelegramChannel>();
+const connectChannel = TelegramChannel.prototype.connect;
+
 describe('TelegramChannel', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.spyOn(TelegramChannel.prototype, 'connect').mockImplementation(function (
+      this: TelegramChannel,
+    ) {
+      connectedChannels.add(this);
+      return connectChannel.call(this);
+    });
     fsMock.existsSync.mockReturnValue(false);
     fsMock.readdirSync.mockReturnValue([]);
     transcribeAudioMock.mockResolvedValue(null);
@@ -251,10 +265,118 @@ describe('TelegramChannel', () => {
     );
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    // Retained voice retries belong to the channel lifecycle. Disconnect each
+    // fixture so its real timers cannot fire against the next test's mocks.
+    for (const channel of connectedChannels) await channel.disconnect();
+    connectedChannels.clear();
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  describe('host recovery command dispatch', () => {
+    it.each(['status', 'clear'])(
+      'dispatches /%s directly without enqueueing a model message',
+      async (command) => {
+        const onHostCommand = vi.fn(async () => ({
+          reply: 'Host response · incident-123',
+        }));
+        const opts = createTestOpts({ onHostCommand });
+        const channel = new TelegramChannel('test-token', opts);
+        await channel.connect();
+        const ctx = createTextCtx({
+          text: `/${command}`,
+          fromId: 42,
+          messageId: 901,
+          date: 1700000000,
+        });
+        await currentBot().commandHandlers.get(command)(ctx);
+        expect(onHostCommand).toHaveBeenCalledWith(
+          command,
+          '',
+          'tg:100200300',
+          expect.objectContaining({
+            id: '901',
+            sender: '42',
+            chat_jid: 'tg:100200300',
+            content: `/${command}`,
+            timestamp: new Date(1700000000 * 1000).toISOString(),
+          }),
+        );
+        expect(ctx.reply).toHaveBeenCalledWith('Host response · incident-123');
+        expect(opts.onMessage).not.toHaveBeenCalled();
+      },
+    );
+
+    it('waits for the restart reply to finish before invoking afterReply', async () => {
+      const afterReply = vi.fn();
+      const opts = createTestOpts({
+        onHostCommand: vi.fn(async () => ({
+          reply: 'Restarting · incident-123',
+          afterReply,
+        })),
+      });
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+      const ctx = createTextCtx({ text: '/restart' });
+      let delivered!: () => void;
+      ctx.reply.mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            delivered = resolve;
+          }),
+      );
+      const dispatch = currentBot().commandHandlers.get('restart')(ctx);
+      await Promise.resolve();
+      expect(ctx.reply).toHaveBeenCalledWith('Restarting · incident-123');
+      expect(afterReply).not.toHaveBeenCalled();
+      delivered();
+      await dispatch;
+      expect(afterReply).toHaveBeenCalledTimes(1);
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+
+    it('does not restart when the evidence-bearing reply cannot be delivered', async () => {
+      const afterReply = vi.fn();
+      const opts = createTestOpts({
+        onHostCommand: vi.fn(async () => ({
+          reply: 'Restarting · incident-123',
+          afterReply,
+        })),
+      });
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+      const ctx = createTextCtx({ text: '/restart' });
+      ctx.reply
+        .mockRejectedValueOnce(new Error('Telegram unavailable'))
+        .mockResolvedValueOnce(undefined);
+      await currentBot().commandHandlers.get('restart')(ctx);
+      expect(afterReply).not.toHaveBeenCalled();
+      expect(ctx.reply).toHaveBeenLastCalledWith('Telegram unavailable');
+    });
+
+    it('passes job arguments to the host and reports authorization errors without model fallback', async () => {
+      const onHostCommand = vi.fn(async () => {
+        throw new Error('Owner required');
+      });
+      const opts = createTestOpts({ onHostCommand });
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+      const ctx = {
+        ...createTextCtx({ text: '/status J-ABCDEF123456' }),
+        match: ' J-ABCDEF123456 ',
+      };
+      await currentBot().commandHandlers.get('status')(ctx);
+      expect(onHostCommand).toHaveBeenCalledWith(
+        'status',
+        'J-ABCDEF123456',
+        'tg:100200300',
+        expect.any(Object),
+      );
+      expect(ctx.reply).toHaveBeenCalledWith('Owner required');
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
   });
 
   // --- Connection lifecycle ---

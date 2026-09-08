@@ -47,6 +47,11 @@ vi.mock('fs', async () => {
   };
 });
 
+vi.mock('./credential-proxy.js', () => ({ detectAuthMode: () => 'oauth' }));
+vi.mock('./env.js', () => ({
+  readEnvFile: () => ({ TODOIST_API_KEY: 'test-secret-token' }),
+}));
+
 // Mock mount-security
 vi.mock('./mount-security.js', () => ({
   validateAdditionalMounts: vi.fn(() => []),
@@ -89,6 +94,7 @@ vi.mock('child_process', async () => {
 
 import { runContainerAgent, ContainerOutput } from './container-runner.js';
 import { spawn } from 'child_process';
+import fs from 'fs';
 import type { RegisteredGroup } from './types.js';
 
 const testGroup: RegisteredGroup = {
@@ -227,4 +233,224 @@ describe('container-runner timeout behavior', () => {
       '/tmp/nanoclaw-test-data/sessions:/workspace/group-sessions:ro',
     );
   });
+});
+
+describe('detached execution and diagnostics', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+    vi.mocked(fs.writeFileSync).mockClear();
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it('isolates execution state and input while retaining group authority', async () => {
+    const promise = runContainerAgent(
+      testGroup,
+      { ...testInput, executionId: 'job-42' },
+      () => {},
+    );
+    emitOutputMarker(fakeProc, { status: 'success', result: 'Done' });
+    fakeProc.emit('close', 0);
+    await promise;
+    const args = vi.mocked(spawn).mock.calls[0][1] as string[];
+    expect(args).toContain(
+      '/tmp/nanoclaw-test-data/executions/job-42/.claude:/home/node/.claude',
+    );
+    expect(args).toContain(
+      '/tmp/nanoclaw-test-data/executions/job-42/agent-runner-src:/app/src',
+    );
+    expect(args).toContain(
+      '/tmp/nanoclaw-test-data/ipc/test-group/executions/job-42/input:/workspace/ipc/input',
+    );
+    expect(args).toContain(
+      '/tmp/nanoclaw-test-data/ipc/test-group:/workspace/ipc',
+    );
+    expect(args).toContain(
+      '/tmp/nanoclaw-test-groups/test-group:/workspace/group',
+    );
+    expect(args.join(' ')).not.toContain('sessions/test-group/.claude');
+  });
+
+  it.each(['../escape', '', 'a/b', 'a'.repeat(101)])(
+    'rejects unsafe execution id %s before spawning',
+    async (executionId) => {
+      await expect(
+        runContainerAgent(testGroup, { ...testInput, executionId }, () => {}),
+      ).rejects.toThrow('Invalid execution');
+      expect(spawn).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not resume foreground sessions in a detached execution', async () => {
+    await expect(
+      runContainerAgent(
+        testGroup,
+        { ...testInput, executionId: 'job', sessionId: 'foreground' },
+        () => {},
+      ),
+    ).rejects.toThrow('cannot resume');
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('progress neither delivers a response nor makes an initialization timeout successful', async () => {
+    const onOutput = vi.fn(async () => {});
+    const onActivity = vi.fn();
+    const promise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      onOutput,
+      onActivity,
+    );
+    fakeProc.stdout.push(
+      `${OUTPUT_START_MARKER}\n${JSON.stringify({ type: 'progress', phase: 'model', newSessionId: 'init' })}\n${OUTPUT_END_MARKER}\n`,
+    );
+    await vi.advanceTimersByTimeAsync(1830000);
+    fakeProc.emit('close', 137);
+    const result = await promise;
+    expect(result.status).toBe('error');
+    expect(result.error).toContain('1830000ms');
+    expect(onOutput).not.toHaveBeenCalled();
+    expect(onActivity).toHaveBeenCalledWith('model');
+  });
+
+  it('does not accept a progress-only clean exit as a result', async () => {
+    const promise = runContainerAgent(testGroup, testInput, () => {});
+    fakeProc.stdout.push(
+      `${OUTPUT_START_MARKER}\n${JSON.stringify({ type: 'progress', phase: 'model' })}\n${OUTPUT_END_MARKER}\n`,
+    );
+    fakeProc.emit('close', 0);
+    expect((await promise).status).toBe('error');
+  });
+
+  it('counts an explicitly completed silent query as idle cleanup', async () => {
+    const promise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      vi.fn(async () => {}),
+    );
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: null,
+      completed: true,
+    });
+    await vi.advanceTimersByTimeAsync(1830000);
+    fakeProc.emit('close', 137);
+    expect((await promise).status).toBe('success');
+  });
+
+  it('a new query after a completed result is not idle timeout cleanup', async () => {
+    const promise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      vi.fn(async () => {}),
+    );
+    emitOutputMarker(fakeProc, { status: 'success', result: 'First response' });
+    fakeProc.stdout.push(
+      `${OUTPUT_START_MARKER}\n${JSON.stringify({ type: 'progress', phase: 'model' })}\n${OUTPUT_END_MARKER}\n`,
+    );
+    await vi.advanceTimersByTimeAsync(1830000);
+    fakeProc.emit('close', 137);
+    expect((await promise).status).toBe('error');
+  });
+
+  it('reports callback rejection instead of leaving completion pending', async () => {
+    const promise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      async () => {
+        throw new Error('delivery failed');
+      },
+    );
+    emitOutputMarker(fakeProc, { status: 'success', result: 'Done' });
+    fakeProc.emit('close', 0);
+    expect(await promise).toMatchObject({
+      status: 'error',
+      error: 'Output callback failed: delivery failed',
+    });
+  });
+
+  it('returns actual result after progress in nonstreaming mode and redacts diagnostics', async () => {
+    const promise = runContainerAgent(testGroup, testInput, () => {});
+    fakeProc.stdout.push(
+      `${OUTPUT_START_MARKER}\n${JSON.stringify({ type: 'progress', phase: 'model' })}\n${OUTPUT_END_MARKER}\n`,
+    );
+    emitOutputMarker(fakeProc, { status: 'success', result: 'Done' });
+    fakeProc.stderr.push('failure test-secret-token');
+    fakeProc.emit('close', 1);
+    expect((await promise).error).not.toContain('test-secret-token');
+    const logs = vi
+      .mocked(fs.writeFileSync)
+      .mock.calls.map((call) => String(call[1]))
+      .join('\n');
+    expect(logs).not.toContain('test-secret-token');
+    expect(logs).toContain('TODOIST_API_KEY=[REDACTED]');
+  });
+
+  it('recovers the next valid marker after an oversized incomplete frame', async () => {
+    const onOutput = vi.fn(async () => {});
+    const promise = runContainerAgent(testGroup, testInput, () => {}, onOutput);
+    fakeProc.stdout.push(OUTPUT_START_MARKER + 'x'.repeat(10485761));
+    emitOutputMarker(fakeProc, { status: 'success', result: 'Recovered' });
+    fakeProc.emit('close', 0);
+    expect((await promise).status).toBe('success');
+    expect(onOutput).toHaveBeenCalledWith(
+      expect.objectContaining({ result: 'Recovered' }),
+    );
+  });
+});
+
+describe('rootless Docker launch identity', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+    vi.spyOn(process, 'getuid').mockReturnValue(1234);
+    vi.spyOn(process, 'getgid').mockReturnValue(5678);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  async function launchArgs(): Promise<string[]> {
+    const result = runContainerAgent(testGroup, testInput, () => {});
+    emitOutputMarker(fakeProc, { status: 'success', result: 'Done' });
+    fakeProc.emit('close', 0);
+    await result;
+    return vi.mocked(spawn).mock.calls[0][1] as string[];
+  }
+
+  it('maps rootless container root to the host owner with the agent home and sandbox flag', async () => {
+    vi.stubEnv('NANOCLAW_ROOTLESS', '1');
+    const args = await launchArgs();
+    expect(
+      args.slice(args.indexOf('--user'), args.indexOf('--user') + 6),
+    ).toEqual(['--user', '0:0', '-e', 'HOME=/home/node', '-e', 'IS_SANDBOX=1']);
+    expect(args).not.toContain('1234:5678');
+  });
+
+  it('keeps host UID/GID mapping when rootless mode is absent', async () => {
+    vi.stubEnv('NANOCLAW_ROOTLESS', undefined);
+    const args = await launchArgs();
+    expect(args[args.indexOf('--user') + 1]).toBe('1234:5678');
+    expect(args).toContain('HOME=/home/node');
+    expect(args).not.toContain('IS_SANDBOX=1');
+  });
+
+  it.each([0, 1000])(
+    'preserves the default container identity for host UID %s without rootless mode',
+    async (uid) => {
+      vi.stubEnv('NANOCLAW_ROOTLESS', undefined);
+      vi.mocked(process.getuid!).mockReturnValue(uid);
+      const args = await launchArgs();
+      expect(args).not.toContain('--user');
+      expect(args).not.toContain('IS_SANDBOX=1');
+    },
+  );
 });

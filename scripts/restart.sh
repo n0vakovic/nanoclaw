@@ -1,4 +1,5 @@
 #!/bin/bash
-cd "$(dirname "$0")/.."
-npm run build && systemctl --user restart nanoclaw
-echo "NanoClaw rebuilt and restarted"
+set -euo pipefail
+# Restart the deployed artifact. Building is deliberately a separate action.
+systemctl --user restart nanoclaw.service
+echo "NanoClaw restarted (existing build)"

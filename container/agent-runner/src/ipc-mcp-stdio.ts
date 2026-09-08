@@ -23,6 +23,8 @@ const chatJid = process.env.NANOCLAW_CHAT_JID!;
 const groupFolder = process.env.NANOCLAW_GROUP_FOLDER!;
 const isMain = process.env.NANOCLAW_IS_MAIN === '1';
 
+// Detached work returns immediately; the host owns its lifecycle independently of this query.
+
 function writeIpcFile(dir: string, data: object): string {
   fs.mkdirSync(dir, { recursive: true });
 
@@ -2109,6 +2111,92 @@ server.tool(
     threadId: z.string().describe('Thread ID returned by Gmail search'),
   },
   (args) => callGoogleHostAction('googleGmailWorkspaceLinks', args),
+);
+
+server.tool(
+  'start_background_job',
+  'Delegate substantial research or tool-heavy work to an independent background job. Returns a durable job ID immediately. The user can keep chatting, inspect /status, /steer, or /cancel it. Supply all necessary context in task; the job has a fresh session and normal group memory. After starting, acknowledge the ID and END your foreground turn. Never synchronously wait or repeatedly poll for completion. Do not use from inside a background job.',
+  { task: z.string().min(1).max(32000) },
+  async ({ task }) => {
+    if (process.env.NANOCLAW_EXECUTION_ID)
+      return {
+        isError: true,
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Detached workers must complete their own task, not launch further jobs.',
+          },
+        ],
+      };
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: await requestHostAction('backgroundJob', { op: 'start', task }),
+        },
+      ],
+    };
+  },
+);
+server.tool(
+  'get_background_job',
+  'Read a background job state, last activity, result, and incident ID. Use on user request or to retrieve a completed result; do not wait in a polling loop.',
+  { id: z.string() },
+  async ({ id }) => ({
+    content: [
+      {
+        type: 'text' as const,
+        text: await requestHostAction('backgroundJob', { op: 'get', id }),
+      },
+    ],
+  }),
+);
+server.tool(
+  'list_background_jobs',
+  'List recent background work visible to this group.',
+  {},
+  async () => ({
+    content: [
+      {
+        type: 'text' as const,
+        text: await requestHostAction('backgroundJob', { op: 'list' }),
+      },
+    ],
+  }),
+);
+server.tool(
+  'cancel_background_job',
+  'Stop a background job and preserve an incident record. Previously performed external effects cannot be undone.',
+  { id: z.string() },
+  async ({ id }) => ({
+    content: [
+      {
+        type: 'text' as const,
+        text: await requestHostAction(
+          'backgroundJob',
+          { op: 'cancel', id },
+          45000,
+        ),
+      },
+    ],
+  }),
+);
+server.tool(
+  'steer_background_job',
+  'Queue a new instruction for a running job. It applies at the next model boundary, not immediately during an active tool call.',
+  { id: z.string(), instruction: z.string().min(1).max(8000) },
+  async ({ id, instruction }) => ({
+    content: [
+      {
+        type: 'text' as const,
+        text: await requestHostAction('backgroundJob', {
+          op: 'steer',
+          id,
+          instruction,
+        }),
+      },
+    ],
+  }),
 );
 
 // Start the stdio transport

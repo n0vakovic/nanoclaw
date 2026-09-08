@@ -64,6 +64,7 @@ export function computeNextRun(task: ScheduledTask): string | null {
 }
 
 export interface SchedulerDependencies {
+  runtimeReady?: () => boolean;
   registeredGroups: () => Record<string, RegisteredGroup>;
   getSessions: () => Record<string, string>;
   queue: GroupQueue;
@@ -81,6 +82,8 @@ async function runTask(
   deps: SchedulerDependencies,
 ): Promise<void> {
   const startTime = Date.now();
+  const queueKey = `scheduled:${task.id}`;
+  const executionId = `scheduled-${task.id.replace(/[^a-zA-Z0-9_-]/g, '_')}-${startTime}`;
   let groupDir: string;
   try {
     groupDir = resolveGroupFolderPath(task.group_folder);
@@ -153,11 +156,6 @@ async function runTask(
   let result: string | null = null;
   let error: string | null = null;
 
-  // For group context mode, use the group's current session
-  const sessions = deps.getSessions();
-  const sessionId =
-    task.context_mode === 'group' ? sessions[task.group_folder] : undefined;
-
   // After the task produces a result, close the container promptly.
   // Tasks are single-turn — no need to wait IDLE_TIMEOUT (30 min) for the
   // query loop to time out. A short delay handles any final MCP calls.
@@ -168,7 +166,7 @@ async function runTask(
     if (closeTimer) return; // already scheduled
     closeTimer = setTimeout(() => {
       logger.debug({ taskId: task.id }, 'Closing task container after result');
-      deps.queue.closeStdin(task.chat_jid);
+      deps.queue.closeStdin(queueKey);
     }, TASK_CLOSE_DELAY_MS);
   };
 
@@ -176,8 +174,11 @@ async function runTask(
     const output = await runContainerAgent(
       group,
       {
-        prompt: task.prompt,
-        sessionId,
+        prompt:
+          task.context_mode === 'group'
+            ? `${task.prompt}\n\nThis scheduled task runs in an independent session. Use the group's files for shared context; the live conversation is separate.`
+            : task.prompt,
+        executionId,
         groupFolder: task.group_folder,
         chatJid: task.chat_jid,
         isMain,
@@ -185,7 +186,13 @@ async function runTask(
         assistantName: ASSISTANT_NAME,
       },
       (proc, containerName) =>
-        deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
+        deps.queue.registerProcess(
+          queueKey,
+          proc,
+          containerName,
+          task.group_folder,
+          `${task.group_folder}/executions/${executionId}`,
+        ),
       async (streamedOutput: ContainerOutput) => {
         if (streamedOutput.result) {
           result = streamedOutput.result;
@@ -194,7 +201,7 @@ async function runTask(
           scheduleClose();
         }
         if (streamedOutput.status === 'success') {
-          deps.queue.notifyIdle(task.chat_jid);
+          deps.queue.notifyIdle(queueKey);
           scheduleClose(); // Close promptly even when result is null (e.g. IPC-only tasks)
         }
         if (streamedOutput.status === 'error') {
@@ -254,7 +261,7 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
 
   const loop = async () => {
     try {
-      const dueTasks = getDueTasks();
+      const dueTasks = deps.runtimeReady?.() === false ? [] : getDueTasks();
       if (dueTasks.length > 0) {
         logger.info({ count: dueTasks.length }, 'Found due tasks');
       }
@@ -266,8 +273,15 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           continue;
         }
 
-        deps.queue.enqueueTask(currentTask.chat_jid, currentTask.id, () =>
-          runTask(currentTask, deps),
+        deps.queue.enqueueTask(
+          `scheduled:${currentTask.id}`,
+          currentTask.id,
+          async () => {
+            // A task can be paused or cancelled while it waits for background capacity.
+            const latest = getTaskById(currentTask.id);
+            if (latest?.status === 'active' && deps.runtimeReady?.() !== false)
+              await runTask(latest, deps);
+          },
         );
       }
     } catch (err) {

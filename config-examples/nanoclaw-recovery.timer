@@ -1,0 +1,10 @@
+[Unit]
+Description=Check NanoClaw worker liveness
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+Unit=nanoclaw-recovery.service
+
+[Install]
+WantedBy=timers.target
