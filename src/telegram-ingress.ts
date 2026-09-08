@@ -16,8 +16,9 @@ export interface IngressUpdate {
 
 export function isImmediateTelegramUpdate(update: IngressUpdate): boolean {
   return (
+    update.message?.text?.trim() === '?' ||
     update.callback_query !== undefined ||
-    /^\/(?:status|jobs|cancel|clear|restart|steer|approve|reject|ping|chatid)(?:@[A-Za-z0-9_]+)?(?:\s|$)/i.test(
+    /^\/(?:help|status|jobs|cancel|clear|restart|steer|approve|reject|ping|chatid)(?:@[A-Za-z0-9_]+)?(?:\s|$)/i.test(
       update.message?.text || '',
     )
   );

@@ -90,6 +90,7 @@ vi.mock('grammy', () => ({
     errorHandler: Handler | null = null;
 
     api = {
+      setMyCommands: vi.fn().mockResolvedValue(true),
       sendMessage: vi.fn().mockResolvedValue(undefined),
       sendChatAction: vi.fn().mockResolvedValue(undefined),
       getFile: vi.fn().mockResolvedValue({ file_path: 'voice/file_42.ogg' }),

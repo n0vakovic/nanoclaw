@@ -157,6 +157,53 @@ function wrapReplyContext(
   return `<reply_to sender="${senderRole}" text="${escaped}">\n${body}\n</reply_to>`;
 }
 
+const BOT_COMMANDS = [
+  { command: 'help', description: 'Show commands and recovery options' },
+  { command: 'status', description: 'Show health, version, or /status J-ID' },
+  { command: 'jobs', description: 'List background jobs' },
+  {
+    command: 'steer',
+    description: 'Change direction: /steer J-ID instruction',
+  },
+  { command: 'cancel', description: 'Stop current work, or /cancel J-ID' },
+  {
+    command: 'clear',
+    description: 'Fresh conversation; keep memory and history',
+  },
+  { command: 'restart', description: 'Restart NanoClaw and save diagnostics' },
+  {
+    command: 'approve',
+    description: 'Approve a pending Google write: /approve ID',
+  },
+  {
+    command: 'reject',
+    description: 'Reject a pending Google write: /reject ID',
+  },
+  { command: 'ping', description: 'Check whether the bot is online' },
+  { command: 'chatid', description: 'Show this chat’s registration ID' },
+];
+
+const HELP_TEXT = [
+  'NanoClaw commands — type / to open the command menu.',
+  '',
+  '/status — health, deployed version, and active work',
+  '/jobs — list background jobs',
+  '/status J-ID — inspect a job and its result',
+  '/steer J-ID instruction — redirect a running job',
+  '/cancel — stop this chat’s current work',
+  '/cancel J-ID — stop a background job',
+  '/clear — fresh conversation; memory and history stay intact',
+  '/restart — restart NanoClaw, preserving diagnostics',
+  '/approve ID or /reject ID — decide a pending Google write',
+  '/ping — check the bot is online',
+  '/chatid — show this chat’s ID',
+  '',
+  'Recovery commands are owner-only; /restart is available in the private main chat. Cancel, clear, and restart save an incident ID for investigation. Steering applies at the next model boundary.',
+  '',
+  'Ask “research this in the background” to keep chatting while work runs.',
+  'Send /help or just ? to see this again. Help works without the agent.',
+].join('\n');
+
 export class TelegramChannel implements Channel {
   private ingress?: TelegramIngress<Update>;
   name = 'telegram';
@@ -755,6 +802,14 @@ export class TelegramChannel implements Channel {
     });
 
     // Command to check bot status
+    this.bot.command('help', (ctx) => ctx.reply(HELP_TEXT));
+    this.bot.use(async (ctx, next) => {
+      if (ctx.message?.text?.trim() === '?') {
+        await ctx.reply(HELP_TEXT);
+        return;
+      }
+      await next();
+    });
     this.bot.command('ping', (ctx) => {
       ctx.reply(`${ASSISTANT_NAME} is online.`);
     });
@@ -1293,6 +1348,9 @@ export class TelegramChannel implements Channel {
             `  Send /chatid to the bot to get a chat's registration ID\n`,
           );
           this.ingress?.start();
+          void this.bot!.api.setMyCommands(BOT_COMMANDS).catch((err) =>
+            logger.warn({ err }, 'Telegram command menu registration failed'),
+          );
           this.resumeRetainedVoiceRetries();
           connected = true;
           resolve();

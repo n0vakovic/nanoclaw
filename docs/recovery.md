@@ -2,6 +2,9 @@
 
 Recovery commands run on the host, without waiting for a model turn:
 
+Send `/help` or just `?` to rediscover the commands. Telegram also lists them
+in its command menu when you type `/`. Help bypasses queued media and agent work.
+
 - `/status`: deployed build identity, running work and queue state.
 - `/jobs`: running background work and job IDs.
 - `/steer J-id instruction`: queue a direction change for a running job, applied at its next model boundary.
