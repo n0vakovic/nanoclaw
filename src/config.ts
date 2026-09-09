@@ -74,6 +74,26 @@ export const TTS_FETCH_TIMEOUT_MS = parseInt(
 // Absolute paths needed for container mounts
 const PROJECT_ROOT = process.cwd();
 export const HOME_DIR = process.env.HOME || os.homedir();
+export const WHATSAPP_WACLI_PATH =
+  process.env.WHATSAPP_WACLI_PATH ||
+  path.join(HOME_DIR, '.local', 'bin', 'wacli');
+export const WHATSAPP_STORE_DIR =
+  process.env.WHATSAPP_STORE_DIR ||
+  path.join(HOME_DIR, '.local', 'state', 'wacli');
+export const WHATSAPP_SYNC_SERVICE =
+  process.env.WHATSAPP_SYNC_SERVICE || 'wacli-sync.service';
+export const WHATSAPP_QUERY_TIMEOUT_MS = parseInt(
+  process.env.WHATSAPP_QUERY_TIMEOUT_MS || '30000',
+  10,
+);
+export const WHATSAPP_MEDIA_TIMEOUT_MS = parseInt(
+  process.env.WHATSAPP_MEDIA_TIMEOUT_MS || '120000',
+  10,
+);
+export const WHATSAPP_MAX_RESULT_BYTES = parseInt(
+  process.env.WHATSAPP_MAX_RESULT_BYTES || '2000000',
+  10,
+);
 export const CODING_DIR = path.join(HOME_DIR, 'coding');
 export const SYNC_DIR = path.join(HOME_DIR, 'damrassbot', 'sync');
 

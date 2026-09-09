@@ -54,6 +54,14 @@ import {
   proposeGoogleWrite,
   type GoogleActionContext,
 } from './google-workspace.js';
+import {
+  downloadWhatsAppMedia,
+  serializeWhatsAppResult,
+  whatsappListChats,
+  whatsappRead,
+  whatsappSearch,
+  whatsappStatus,
+} from './whatsapp-workspace.js';
 
 export interface ActionRequest {
   action: string;
@@ -453,6 +461,67 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
     if (!backgroundJobAction || !ctx?.sourceGroup)
       throw new Error('Background jobs are unavailable');
     return backgroundJobAction(params, ctx);
+  },
+  whatsappStatus: async (_params, ctx) => {
+    assertMain(ctx);
+    return whatsappStatus();
+  },
+  whatsappListChats: async (params, ctx) => {
+    assertMain(ctx);
+    return whatsappListChats(params || {});
+  },
+  whatsappRead: async (params, ctx) => {
+    assertMain(ctx);
+    return whatsappRead(params || {});
+  },
+  whatsappSearchMessages: async (params, ctx) => {
+    assertMain(ctx);
+    return whatsappSearch(params || {});
+  },
+  whatsappGetMedia: async (params, ctx) => {
+    assertMain(ctx);
+    const downloaded = await downloadWhatsAppMedia(
+      params || {},
+      ctx.groupIpcDir,
+    );
+    return serializeWhatsAppResult(downloaded.publicResult);
+  },
+  whatsappTranscribe: async (params, ctx) => {
+    assertMain(ctx);
+    const downloaded = await downloadWhatsAppMedia(
+      params || {},
+      ctx.groupIpcDir,
+    );
+    const stat = fs.statSync(downloaded.hostPath);
+    const maxBytes = 25 * 1024 * 1024;
+    if (stat.size > maxBytes) {
+      throw new Error(
+        `whatsapp: audio exceeds ${maxBytes} byte transcription limit`,
+      );
+    }
+    if (!downloaded.publicResult.mediaType.toLowerCase().includes('audio')) {
+      fs.unlinkSync(downloaded.hostPath);
+      throw new Error('whatsapp: selected message is not audio');
+    }
+    const outcome = await transcribeAudioDetailed(
+      fs.readFileSync(downloaded.hostPath),
+      path.basename(downloaded.hostPath),
+      {
+        timeoutMs: RETAINED_TRANSCRIPTION_TIMEOUT_MS,
+        enablePlainFallback: false,
+        primaryMode: 'gpt4o_plain_json',
+        context: 'whatsapp_host_action',
+      },
+    );
+    if (!outcome.transcript) {
+      throw new Error(
+        `whatsapp: transcription failed (${outcome.diagnostic.classification})`,
+      );
+    }
+    return serializeWhatsAppResult({
+      ...downloaded.publicResult,
+      transcript: outcome.transcript,
+    });
   },
   googleCalendarList: async (params, ctx) =>
     googleCalendarList(params || {}, googleContext(ctx).sourceGroup),
