@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",
+    "busboy": "^1.6.0",
     "cron-parser": "^5.5.0",
     "grammy": "^1.39.3",
     "openai": "^6.27.0",
@@ -31,6 +32,7 @@
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
+    "@types/busboy": "^1.5.4",
     "@types/node": "^22.10.0",
     "@vitest/coverage-v8": "^4.0.18",
     "husky": "^9.1.7",

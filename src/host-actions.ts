@@ -1,3 +1,4 @@
+import { getArtifactService } from './artifact-server.js';
 /**
  * Host Action Registry for NanoClaw
  *
@@ -457,6 +458,30 @@ export function configureBackgroundJobs(handler: ActionHandler): void {
 }
 
 const ACTION_REGISTRY: Record<string, ActionHandler> = {
+  shareArtifact: async (params, ctx) => {
+    if (
+      !ctx?.sourceGroup ||
+      !ctx.sourceChatJid ||
+      !ctx.requestId ||
+      ctx.registeredGroups?.()[ctx.sourceChatJid]?.folder !== ctx.sourceGroup
+    )
+      throw new Error('Missing registered source context');
+    const file = String(params?.path || '');
+    if (!file.startsWith('/workspace/group/'))
+      throw new Error('Share a finished file under /workspace/group/');
+    return JSON.stringify(
+      await getArtifactService().shareLocal(
+        resolveGroupFolderPath(ctx.sourceGroup),
+        file.slice('/workspace/group/'.length),
+        `group-${ctx.sourceGroup}`,
+        ctx.sourceChatJid,
+        ctx.requestId,
+        String(params?.title || path.basename(file)),
+        params?.ttlDays as number | undefined,
+        params?.entry as string | undefined,
+      ),
+    );
+  },
   backgroundJob: async (params, ctx) => {
     if (!backgroundJobAction || !ctx?.sourceGroup)
       throw new Error('Background jobs are unavailable');

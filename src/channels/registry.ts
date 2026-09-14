@@ -7,6 +7,7 @@ import {
 } from '../types.js';
 
 export interface ChannelOpts {
+  artifactSharingEnabled?: () => boolean;
   onFatal?: (error: unknown) => void;
   onMessage: OnInboundMessage;
   onHostCommand?: OnHostCommand;

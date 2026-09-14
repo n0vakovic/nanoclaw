@@ -157,6 +157,8 @@ Single Node.js process. Channels are added via skills and self-register at start
 
 For the full architecture details, see [docs/SPEC.md](docs/SPEC.md).
 
+This fork also supports [private artifact previews and Telegram sharing](docs/artifact-sharing.md), including a standalone Mac/Linux CLI, local agent exports, pinning, cleanup, and explicit gist promotion.
+
 Key files:
 - `src/index.ts` - Orchestrator: state, message loop, agent invocation
 - `src/channels/registry.ts` - Channel registry (self-registration at startup)

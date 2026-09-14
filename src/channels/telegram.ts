@@ -1,3 +1,4 @@
+import { parseShareIntent } from '../artifact-controls.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -158,6 +159,10 @@ function wrapReplyContext(
 }
 
 const BOT_COMMANDS = [
+  {
+    command: 'share',
+    description: 'Manage a share: status, pin, unpin, delete, publish',
+  },
   { command: 'help', description: 'Show commands and recovery options' },
   { command: 'status', description: 'Show health, version, or /status J-ID' },
   { command: 'jobs', description: 'List background jobs' },
@@ -815,6 +820,7 @@ export class TelegramChannel implements Channel {
     });
 
     for (const command of [
+      'share',
       'approve',
       'reject',
       'status',
@@ -837,6 +843,9 @@ export class TelegramChannel implements Channel {
           ctx.from?.first_name || ctx.from?.username || sender || 'Unknown';
         const message: NewMessage = {
           id: commandMessage.message_id.toString(),
+          is_bot_message: ctx.from?.is_bot,
+          reply_to_message_id:
+            commandMessage.reply_to_message?.message_id.toString(),
           chat_jid: chatJid,
           sender,
           sender_name: senderName,
@@ -965,6 +974,36 @@ export class TelegramChannel implements Channel {
     this.bot.on('message:text', async (ctx) => {
       // Skip commands
       if (ctx.message.text.startsWith('/')) return;
+      if (
+        this.opts.artifactSharingEnabled?.() &&
+        parseShareIntent(ctx.message.text) &&
+        this.opts.onHostCommand
+      ) {
+        try {
+          const result = await this.opts.onHostCommand(
+            'share',
+            ctx.message.text,
+            `tg:${ctx.chat.id}`,
+            {
+              id: String(ctx.message.message_id),
+              reply_to_message_id:
+                ctx.message.reply_to_message?.message_id.toString(),
+              chat_jid: `tg:${ctx.chat.id}`,
+              sender: String(ctx.from?.id || ''),
+              sender_name: ctx.from?.first_name || '',
+              content: ctx.message.text,
+              timestamp: new Date(ctx.message.date * 1000).toISOString(),
+              is_bot_message: ctx.from?.is_bot,
+            },
+          );
+          await ctx.reply(result.reply);
+        } catch (e) {
+          await ctx.reply(
+            e instanceof Error ? e.message : 'Share control failed',
+          );
+        }
+        return;
+      }
 
       const chatJid = `tg:${ctx.chat.id}`;
       let content = ctx.message.text;
@@ -1407,6 +1446,16 @@ export class TelegramChannel implements Channel {
       { jid, approvalId: normalizedApprovalId, length: text.length },
       'Telegram approval message sent',
     );
+  }
+
+  async sendArtifactNotification(jid: string, text: string): Promise<string> {
+    if (!this.bot) throw new Error('Telegram bot not initialized');
+    const message = await this.bot.api.sendMessage(
+      jid.replace(/^tg:/, ''),
+      text,
+      { link_preview_options: { is_disabled: true } },
+    );
+    return String(message.message_id);
   }
 
   async sendMessageStrict(jid: string, text: string): Promise<void> {
