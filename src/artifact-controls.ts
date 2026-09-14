@@ -130,15 +130,33 @@ export async function promote(
       }
       if (!content! || content!.includes('\0'))
         fail(400, 'Gist files must be nonempty UTF-8 text');
-      if (
-        /\.html?$/i.test(f.path) &&
-        (/\b(?:src|href)\s*=\s*["']?(?!data:|#)[^\s>]/i.test(content!) ||
-          /url\s*\(|\b(?:fetch|import)\s*\(/i.test(content!))
-      )
-        fail(
-          400,
-          'HTML gist promotion requires self-contained HTML without linked assets',
+      if (/\.html?$/i.test(f.path)) {
+        const references = [
+          ...content!.matchAll(
+            /\b(?:src|href|srcset|poster)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi,
+          ),
+        ];
+        const linked = references.some(
+          (m) => !/^(?:data:|#)/i.test(m[1] ?? m[2] ?? m[3]),
         );
+        const cssReferences = [
+          ...content!.matchAll(
+            /url\(\s*(?:"([^"]*)"|'([^']*)'|([^\s)]*))\s*\)/gi,
+          ),
+        ];
+        const linkedCss = cssReferences.some(
+          (m) => !/^(?:data:|#)/i.test(m[1] ?? m[2] ?? m[3]),
+        );
+        if (
+          linked ||
+          linkedCss ||
+          /@import\b|\bfetch\s*\(|\bimport(?:\s|\()/i.test(content!)
+        )
+          fail(
+            400,
+            'HTML gist promotion requires self-contained HTML without linked assets',
+          );
+      }
       files[f.path] = { content: content! };
     }
     const marker = `[nanoclaw:${id}:${visibility}]`;

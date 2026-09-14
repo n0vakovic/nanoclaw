@@ -226,3 +226,18 @@ describe('owner controls and publication', () => {
     expect(call).not.toHaveBeenCalled();
   });
 });
+
+it('allows embedded data images in self-contained HTML promotion', async () => {
+  const s = setup();
+  const r = add(
+    s,
+    'request-data',
+    '<img src="data:image/png;base64,AAAA"><a href="#details">Details</a>',
+  );
+  const call = vi
+    .fn()
+    .mockResolvedValue({ html_url: 'https://gist.github.com/test/embedded' });
+  expect((await promote(s, r.id, 'secret', '123', call))?.state).toBe(
+    'published',
+  );
+});
