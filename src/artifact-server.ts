@@ -297,7 +297,7 @@ export class ArtifactService {
           files: 1000,
           fields: 1,
           fieldSize: 512 * 1024,
-          fileSize: this.store.maxBytes,
+          fileSize: this.store.maxBytes + 1,
           parts: 1001,
           headerPairs: 20,
         },

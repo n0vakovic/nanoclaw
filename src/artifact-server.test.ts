@@ -6,7 +6,7 @@ import { afterEach, expect, it } from 'vitest';
 import { ArtifactService } from './artifact-server.js';
 import { digest } from './artifact-store.js';
 const services: ArtifactService[] = [];
-async function setup() {
+async function setup(limits: { maxBytes?: number } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'artifact-http-'));
   const s = new ArtifactService({
     directory,
@@ -14,6 +14,7 @@ async function setup() {
     previewOrigin: 'https://preview.example:8443',
     apiPort: 0,
     previewPort: 0,
+    ...limits,
   });
   services.push(s);
   await new Promise<void>((r) => s.api.listen(0, '127.0.0.1', r));
@@ -218,4 +219,14 @@ it('cleans interrupted uploads and releases the upload slot', async () => {
   expect(s.busy).toBe(false);
   expect(s.store.all()).toEqual([]);
   expect(fs.readdirSync(path.join(s.store.directory, 'staging'))).toEqual([]);
+});
+
+it('accepts a file exactly at the configured byte limit', async () => {
+  const { api, headers } = await setup({ maxBytes: 5 });
+  const response = await fetch(api + '/v1/artifacts', {
+    method: 'POST',
+    headers,
+    body: upload('hello'),
+  });
+  expect(response.status).toBe(201);
 });
