@@ -2294,6 +2294,11 @@ server.tool(
   }),
 );
 
+
+server.tool('share_artifact', 'Share a finished file or static folder from /workspace/group/ as a private preview and send its link to Telegram. The host snapshots it; default expiry is seven days. Do not also send a duplicate notification. Publication to GitHub requires an explicit owner reply in Telegram.', {
+  path: z.string(), title: z.string(), entry: z.string().optional(), ttlDays: z.number().int().min(1).max(30).optional(),
+}, async (params) => callGoogleHostAction('shareArtifact', params));
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

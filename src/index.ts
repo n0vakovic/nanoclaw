@@ -1,3 +1,10 @@
+import {
+  ArtifactService,
+  artifactConfig,
+  setArtifactService,
+  getArtifactService,
+} from './artifact-server.js';
+import { artifactControl } from './artifact-controls.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -901,6 +908,8 @@ async function main(): Promise<void> {
     PROXY_BIND_HOST,
   );
 
+  let artifactService: ArtifactService | undefined;
+
   // Graceful shutdown handlers
   let shuttingDown = false;
   const shutdown = async (signal: string) => {
@@ -913,6 +922,7 @@ async function main(): Promise<void> {
     // Running jobs remain persisted and are reconciled as interrupted next boot.
     setTimeout(() => process.exit(0), 15000).unref();
     proxyServer.close();
+    await artifactService?.close();
     await queue.shutdown(10000);
     await waitForGoogleExecutions(10000);
     for (const ch of channels) await ch.disconnect();
@@ -1039,6 +1049,7 @@ async function main(): Promise<void> {
 
   // Channel callbacks (shared by all channels)
   const channelOpts = {
+    artifactSharingEnabled: () => Boolean(artifactService),
     onFatal: (error: unknown) => {
       logger.fatal(
         { error },
@@ -1094,6 +1105,14 @@ async function main(): Promise<void> {
       chatJid: string,
       msg: NewMessage,
     ) => {
+      if (command === 'share')
+        return artifactControl(
+          getArtifactService().store,
+          registeredGroups,
+          chatJid,
+          msg,
+          args,
+        );
       if (CONTROL_COMMANDS.includes(command))
         return handleControlCommand(controlDeps, command, args, chatJid, msg);
       if (command !== 'approve' && command !== 'reject') {
@@ -1200,6 +1219,18 @@ async function main(): Promise<void> {
       await targetChannel.sendMessage(targetJid, text);
     }
   });
+
+  const previewConfig = artifactConfig();
+  if (previewConfig) {
+    artifactService = new ArtifactService(previewConfig);
+    setArtifactService(artifactService);
+    await artifactService.start(async (jid, text) => {
+      const channel = findChannel(channels, jid);
+      if (!channel?.sendArtifactNotification)
+        throw new Error('Artifact Telegram sender unavailable');
+      return channel.sendArtifactNotification(jid, text);
+    });
+  }
 
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({

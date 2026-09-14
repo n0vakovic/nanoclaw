@@ -43,6 +43,7 @@ export interface RegisteredGroup {
 }
 
 export interface NewMessage {
+  reply_to_message_id?: string;
   id: string;
   chat_jid: string;
   sender: string;
@@ -86,6 +87,7 @@ export interface Channel {
   // Optional strict variant for security-sensitive notifications where the
   // caller must know whether delivery failed.
   sendMessageStrict?(jid: string, text: string): Promise<void>;
+  sendArtifactNotification?(jid: string, text: string): Promise<string>;
   // Optional richer approval delivery. Telegram uses this to attach native
   // inline Approve/Reject buttons without exposing a generic keyboard API to
   // the rest of the host.

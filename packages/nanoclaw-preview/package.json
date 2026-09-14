@@ -1,0 +1,9 @@
+{
+  "name": "nanoclaw-preview-cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {"nanoclaw": "cli.mjs"},
+  "engines": {"node": ">=22"},
+  "description": "Private artifact sharing client for NanoClaw"
+}
