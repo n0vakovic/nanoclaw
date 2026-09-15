@@ -75,6 +75,11 @@ vi.mock('../transcription.js', () => ({
   },
 }));
 
+const saveAttachmentMock = vi.hoisted(() => vi.fn());
+vi.mock('../telegram-media.js', () => ({
+  saveTelegramAttachment: saveAttachmentMock,
+}));
+
 // --- Grammy mock ---
 
 type Handler = (...args: any[]) => any;
@@ -244,6 +249,11 @@ const connectChannel = TelegramChannel.prototype.connect;
 
 describe('TelegramChannel', () => {
   beforeEach(() => {
+    saveAttachmentMock.mockReset();
+    saveAttachmentMock.mockResolvedValue({
+      containerPath: '/workspace/ipc/media/attachment',
+      bytes: 123,
+    });
     vi.clearAllMocks();
     vi.spyOn(TelegramChannel.prototype, 'connect').mockImplementation(function (
       this: TelegramChannel,
@@ -906,12 +916,14 @@ describe('TelegramChannel', () => {
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
 
-      const ctx = createMediaCtx({});
+      const ctx = createMediaCtx({ extra: { video: { file_id: 'video-id' } } });
       await triggerMediaMessage('message:video', ctx);
 
       expect(opts.onMessage).toHaveBeenCalledWith(
         'tg:100200300',
-        expect.objectContaining({ content: '[Video]' }),
+        expect.objectContaining({
+          content: expect.stringContaining('/workspace/ipc/media/attachment'),
+        }),
       );
     });
 
@@ -1097,16 +1109,18 @@ describe('TelegramChannel', () => {
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
 
-      const ctx = createMediaCtx({});
+      const ctx = createMediaCtx({ extra: { audio: { file_id: 'audio-id' } } });
       await triggerMediaMessage('message:audio', ctx);
 
       expect(opts.onMessage).toHaveBeenCalledWith(
         'tg:100200300',
-        expect.objectContaining({ content: '[Audio]' }),
+        expect.objectContaining({
+          content: expect.stringContaining('/workspace/ipc/media/attachment'),
+        }),
       );
     });
 
-    it('stores document with filename', async () => {
+    it('downloads documents and passes the saved path to the agent', async () => {
       const opts = createTestOpts();
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
@@ -1115,14 +1129,37 @@ describe('TelegramChannel', () => {
         extra: { document: { file_name: 'report.pdf' } },
       });
       await triggerMediaMessage('message:document', ctx);
+      expect(saveAttachmentMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          chatJid: 'tg:100200300',
+          kind: 'document',
+          attachment: { file_name: 'report.pdf' },
+        }),
+      );
 
       expect(opts.onMessage).toHaveBeenCalledWith(
         'tg:100200300',
-        expect.objectContaining({ content: '[Document: report.pdf]' }),
+        expect.objectContaining({
+          content: expect.stringContaining('/workspace/ipc/media/attachment'),
+        }),
       );
     });
 
-    it('stores document with fallback name when filename missing', async () => {
+    it('does not acknowledge a document whose download failed, allowing ingress recovery', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+      saveAttachmentMock.mockRejectedValueOnce(new Error('download failed'));
+      const ctx = createMediaCtx({
+        extra: { document: { file_id: 'pdf-id', file_name: 'report.pdf' } },
+      });
+      await expect(
+        triggerMediaMessage('message:document', ctx),
+      ).rejects.toThrow('download failed');
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+
+    it('downloads documents without an original filename', async () => {
       const opts = createTestOpts();
       const channel = new TelegramChannel('test-token', opts);
       await channel.connect();
@@ -1132,7 +1169,9 @@ describe('TelegramChannel', () => {
 
       expect(opts.onMessage).toHaveBeenCalledWith(
         'tg:100200300',
-        expect.objectContaining({ content: '[Document: file]' }),
+        expect.objectContaining({
+          content: expect.stringContaining('/workspace/ipc/media/attachment'),
+        }),
       );
     });
 

@@ -1,3 +1,4 @@
+import { saveTelegramAttachment } from '../telegram-media.js';
 import { parseShareIntent } from '../artifact-controls.js';
 import fs from 'fs';
 import path from 'path';
@@ -1201,7 +1202,7 @@ export class TelegramChannel implements Channel {
         is_from_me: false,
       });
     });
-    this.bot.on('message:video', (ctx) => storeNonText(ctx, '[Video]'));
+
     this.bot.on('message:voice', async (ctx) => {
       const chatJid = `tg:${ctx.chat.id}`;
       const group = this.opts.registeredGroups()[chatJid];
@@ -1313,11 +1314,37 @@ export class TelegramChannel implements Channel {
         is_from_me: false,
       });
     });
-    this.bot.on('message:audio', (ctx) => storeNonText(ctx, '[Audio]'));
-    this.bot.on('message:document', (ctx) => {
-      const name = ctx.message.document?.file_name || 'file';
-      storeNonText(ctx, `[Document: ${name}]`);
-    });
+    for (const kind of ['document', 'audio', 'video'] as const) {
+      this.bot.on(`message:${kind}`, async (ctx) => {
+        const chatJid = `tg:${ctx.chat.id}`;
+        const group = this.opts.registeredGroups()[chatJid];
+        if (!group) return;
+        const attachment = ctx.message[kind];
+        if (!attachment) throw new Error('Missing Telegram attachment');
+        const saved = await saveTelegramAttachment({
+          botToken: this.botToken,
+          getFile: (id) => ctx.api.getFile(id),
+          chatJid,
+          groupFolder: group.folder,
+          messageId: ctx.message.message_id,
+          kind,
+          attachment,
+        });
+        logger.info(
+          {
+            chatJid,
+            kind,
+            messageId: ctx.message.message_id,
+            bytes: saved.bytes,
+          },
+          'Saved Telegram attachment to IPC media',
+        );
+        storeNonText(
+          ctx,
+          `[${kind}: ${saved.containerPath}]\nFile downloaded to ${saved.containerPath}. Read it with an appropriate tool; keep the original file.${kind !== 'document' ? ' This attachment is saved, not automatically transcribed.' : ''}`,
+        );
+      });
+    }
     this.bot.on('message:sticker', (ctx) => {
       const emoji = ctx.message.sticker?.emoji || '';
       storeNonText(ctx, `[Sticker ${emoji}]`);

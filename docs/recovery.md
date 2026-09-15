@@ -91,3 +91,25 @@ with the same permissions as incidents. Successful turns clear the in-memory fai
 flag; a later normal idle shutdown does not send another failure notice. Recovery
 does not imply the originally failed work was completed, only that a later turn
 succeeded. Existing cursor/replay protection remains in place.
+
+## Telegram attachment recovery
+
+Documents (including PDFs and images sent as files), audio files and videos are
+saved under `/workspace/ipc/media/` before their message is delivered to the agent.
+Filenames include the Telegram message ID, are sanitized, and are written atomically.
+Downloads are bounded to 20 MiB and checked against the supplied file size. Ordinary
+photos retain their existing image handler; voice notes retain their transcription
+and recovery handler. Audio/video attachments are saved without automatic transcription.
+
+Host-only `telegram-media/<chat hash>/<message ID>.json` records retain the Telegram
+file reference before download and its success/failure category afterward. This lets
+an operator retry `getFile` and the download even after ingress clears a processed
+update. Never put the bot token in those records. Failed downloads throw into the
+existing ingress retry/incident path instead of telling the agent a file arrived.
+These records currently have no automatic retention cleanup.
+
+Before this handler existed, documents were stored as filename-only placeholders;
+successful ingress receipts contain no original update. Recovering such an old
+attachment requires its file ID from another retained source or a user-authorized
+Telegram forward/resend. A temporary forward returns the document file ID; download
+and verify the file, then delete only the temporary copy. Keep the original message.
