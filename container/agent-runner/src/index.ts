@@ -475,7 +475,9 @@ async function runQuery(
       options: {
         abortController,
         includePartialMessages: true,
-        model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
+        model: process.env.CLAUDE_MODEL || 'claude-sonnet-5',
+        thinking: { type: 'adaptive' },
+        effort: 'medium',
         cwd: '/workspace/group',
         additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
         resume: sessionId,
@@ -611,7 +613,7 @@ async function runQuery(
               }
             : {}),
           resultId: message.uuid,
-          model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
+          model: process.env.CLAUDE_MODEL || 'claude-sonnet-5',
           result: resultText || null,
           newSessionId,
         });
