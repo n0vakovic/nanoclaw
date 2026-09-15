@@ -37,6 +37,8 @@ export interface RecoverySnapshot {
   queue?: RecoveryQueueEntry[];
   errorCode?: string;
   exitCode?: number;
+  resultId?: string;
+  model?: string;
 }
 
 export function recoveryStateDir(): string {
@@ -72,6 +74,8 @@ function sanitize(snapshot: RecoverySnapshot): RecoverySnapshot {
     uptimeSeconds: numeric(snapshot.uptimeSeconds),
     errorCode: token(snapshot.errorCode, 64),
     exitCode: numeric(snapshot.exitCode),
+    resultId: token(snapshot.resultId),
+    model: token(snapshot.model),
     queue: Array.isArray(snapshot.queue)
       ? snapshot.queue
           .slice(0, 100)
@@ -163,4 +167,77 @@ export function writeHeartbeat(snapshot: RecoverySnapshot): void {
     build: readBuildIdentity(),
     snapshot: sanitize(snapshot),
   });
+}
+
+interface ForegroundFailure {
+  id: string;
+  at: string;
+  errorCode: string;
+  resultId?: string;
+  model?: string;
+  recoveredAt?: string;
+}
+
+function foregroundFailurePath(jid: string): string {
+  const key = crypto.createHash('sha256').update(jid).digest('hex');
+  return path.join(recoveryStateDir(), 'foreground-failures', `${key}.json`);
+}
+
+function readForegroundFailure(jid: string): ForegroundFailure | undefined {
+  try {
+    const value = JSON.parse(
+      fs.readFileSync(foregroundFailurePath(jid), 'utf8'),
+    );
+    if (!token(value.id) || !token(value.at) || !token(value.errorCode, 64))
+      return;
+    return {
+      id: value.id,
+      at: value.at,
+      errorCode: value.errorCode,
+      resultId: token(value.resultId),
+      model: token(value.model),
+      recoveredAt: token(value.recoveredAt),
+    };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw err;
+  }
+}
+
+export function foregroundFailureStatus(jid: string): string {
+  const failure = readForegroundFailure(jid);
+  if (!failure) return '';
+  return `\nLast agent failure: ${failure.errorCode} at ${failure.at}${failure.model ? ' · ' + failure.model : ''}\nIncident: ${failure.id}${failure.resultId ? '\nSDK result: ' + failure.resultId : ''}\n${failure.recoveredAt ? 'Recovered: successful turn at ' + failure.recoveredAt : 'No subsequent successful turn recorded.'}\nHost evidence: incidents/${failure.id}.json`;
+}
+
+/** A failure belongs to a completed query, not the entire idle container lifetime. */
+export class ForegroundFailures {
+  currentIncident: string | undefined;
+
+  constructor(private readonly jid: string) {}
+
+  fail(snapshot: RecoverySnapshot): string {
+    const safe = sanitize(snapshot);
+    const id = captureIncident('foreground_failed', safe);
+    atomicWrite(foregroundFailurePath(this.jid), {
+      id,
+      at: new Date().toISOString(),
+      errorCode: safe.errorCode || 'agent_error',
+      resultId: safe.resultId,
+      model: safe.model,
+    });
+    this.currentIncident = id;
+    return id;
+  }
+
+  succeed(): void {
+    const failure = readForegroundFailure(this.jid);
+    if (failure && !failure.recoveredAt) {
+      atomicWrite(foregroundFailurePath(this.jid), {
+        ...failure,
+        recoveredAt: new Date().toISOString(),
+      });
+    }
+    this.currentIncident = undefined;
+  }
 }

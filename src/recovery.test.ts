@@ -4,6 +4,8 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   captureIncident,
+  ForegroundFailures,
+  foregroundFailureStatus,
   readBuildIdentity,
   RecoverySnapshot,
   writeHeartbeat,
@@ -74,5 +76,55 @@ describe('recovery evidence', () => {
       builtAt: 'unknown',
       dirty: null,
     });
+  });
+});
+
+describe('foreground failure lifecycle', () => {
+  it('captures a failure immediately, then clears the stale flag after recovery', () => {
+    const failures = new ForegroundFailures('g');
+    const id = failures.fail({
+      groupJid: 'g',
+      errorCode: 'error_during_execution',
+      resultId: 'result-1',
+      model: 'claude-sonnet-4-6',
+    });
+    expect(failures.currentIncident).toBe(id);
+    expect(fs.existsSync(path.join(directory, 'incidents', `${id}.json`))).toBe(
+      true,
+    );
+    expect(foregroundFailureStatus('g')).toContain(
+      'No subsequent successful turn',
+    );
+    failures.succeed();
+    expect(failures.currentIncident).toBeUndefined();
+    expect(foregroundFailureStatus('g')).toContain(
+      'Recovered: successful turn',
+    );
+    expect(foregroundFailureStatus('g')).toContain('result-1');
+    // Idle shutdown must not manufacture a second incident.
+    expect(fs.readdirSync(path.join(directory, 'incidents'))).toHaveLength(1);
+    expect(foregroundFailureStatus('other')).toBe('');
+  });
+  it('retains failure evidence across restart and records later recovery', () => {
+    new ForegroundFailures('g').fail({ errorCode: 'container_timeout' });
+    const restarted = new ForegroundFailures('g');
+    restarted.succeed();
+    expect(foregroundFailureStatus('g')).toContain('Recovered:');
+    restarted.fail({ errorCode: 'container_exit', exitCode: 137 });
+    expect(foregroundFailureStatus('g')).toContain(
+      'No subsequent successful turn',
+    );
+    expect(fs.readdirSync(path.join(directory, 'incidents'))).toHaveLength(2);
+  });
+  it('keeps private error text out of summaries and fails honestly on unwritable evidence', () => {
+    const failures = new ForegroundFailures('g');
+    failures.fail({
+      errorCode: 'private error text',
+      model: 'private model text',
+    });
+    expect(foregroundFailureStatus('g')).not.toContain('private');
+    fs.rmSync(path.join(directory, 'incidents'), { recursive: true });
+    fs.writeFileSync(path.join(directory, 'incidents'), 'blocked');
+    expect(() => failures.fail({ errorCode: 'container_exit' })).toThrow();
   });
 });

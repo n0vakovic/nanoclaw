@@ -68,6 +68,10 @@ export interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  errorCode?: string;
+  resultId?: string;
+  model?: string;
+  exitCode?: number;
 }
 
 interface VolumeMount {
@@ -492,6 +496,21 @@ export async function runContainerAgent(
             continue;
           if (typeof parsed.newSessionId === 'string')
             newSessionId = parsed.newSessionId;
+          if (parsed.status === 'error') {
+            logger.error(
+              {
+                group: group.name,
+                containerName,
+                resultId: parsed.resultId,
+                errorCode: parsed.errorCode,
+                error:
+                  typeof parsed.error === 'string'
+                    ? redact(parsed.error).slice(0, 4000)
+                    : undefined,
+              },
+              'Streamed agent failure',
+            );
+          }
           lastOutput = parsed;
           hadStreamingOutput =
             parsed.status === 'success' &&
@@ -628,6 +647,7 @@ export async function runContainerAgent(
           status: 'error',
           result: null,
           error: `Container timed out after ${timeoutMs}ms`,
+          errorCode: 'container_timeout',
         });
         return;
       }
@@ -707,6 +727,8 @@ export async function runContainerAgent(
           status: 'error',
           result: null,
           error: `Container exited with code ${code}: ${stderr.slice(-200)}`,
+          errorCode: 'container_exit',
+          exitCode: code ?? undefined,
         });
         return;
       }

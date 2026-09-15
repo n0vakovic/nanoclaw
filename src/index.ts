@@ -77,6 +77,8 @@ import { configureBackgroundJobs } from './host-actions.js';
 import { CONTROL_COMMANDS, handleControlCommand } from './control.js';
 import {
   captureIncident,
+  ForegroundFailures,
+  foregroundFailureStatus,
   readBuildIdentity,
   writeHeartbeat,
   RecoverySnapshot,
@@ -372,11 +374,30 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   };
 
   await channel.setTyping?.(chatJid, true);
-  let hadError = false;
+  const failures = new ForegroundFailures(chatJid);
   let outputSentToUser = false;
 
   const output = await runAgent(group, prompt, chatJid, async (result) => {
     if ((recoveryEpoch.get(chatJid) || 0) !== epoch) return;
+    // Persist the failure before delivery or idle shutdown can obscure it.
+    if (result.status === 'error') {
+      const incident = failures.fail({
+        ...recoverySnapshot(chatJid),
+        errorCode: result.errorCode || 'sdk_query_failed',
+        resultId: result.resultId,
+        model: result.model,
+      });
+      logger.warn(
+        { incident, group: group.name, errorCode: result.errorCode },
+        'Agent turn failed',
+      );
+      await sendStrict(
+        chatJid,
+        `An agent turn failed (${result.errorCode || 'sdk_query_failed'}). Incident ${incident}. Use /status to inspect recovery.`,
+      ).catch((err) =>
+        logger.warn({ err, incident }, 'Failure notice delivery failed'),
+      );
+    }
     // Streaming output callback — called for each agent result
     if (result.result) {
       const raw =
@@ -395,15 +416,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
 
     if (result.status === 'success' && (result.completed || result.result)) {
+      failures.succeed();
       // A container query fully completed, so everything piped up to now has
       // been processed — safe to confirm. Crash recovery keys off this.
       lastConfirmedTimestamp[chatJid] = lastAgentTimestamp[chatJid] || '';
       saveState();
       queue.notifyIdle(chatJid);
-    }
-
-    if (result.status === 'error') {
-      hadError = true;
     }
   });
 
@@ -412,17 +430,21 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   if ((recoveryEpoch.get(chatJid) || 0) !== epoch) return true;
 
-  if (output === 'error' || hadError) {
-    const incident = captureIncident('foreground_failed', {
-      ...recoverySnapshot(chatJid),
-      messageId: missedMessages[missedMessages.length - 1].id,
-    });
-    await sendStrict(
-      chatJid,
-      `I couldn't complete that turn. Incident ${incident}. Use /status to inspect, /cancel to stop retries, or /clear for a fresh session.`,
-    ).catch((err) =>
-      logger.warn({ err, incident }, 'Failure notice delivery failed'),
-    );
+  if (output.status === 'error' || failures.currentIncident) {
+    // Streamed failures were already captured and announced at the failing turn.
+    if (!failures.currentIncident) {
+      const incident = failures.fail({
+        ...recoverySnapshot(chatJid),
+        errorCode: output.errorCode || 'container_failed',
+        exitCode: output.exitCode,
+      });
+      await sendStrict(
+        chatJid,
+        `Agent execution failed (${output.errorCode || 'container_failed'}). Incident ${incident}. Use /status to inspect recovery.`,
+      ).catch((err) =>
+        logger.warn({ err, incident }, 'Failure notice delivery failed'),
+      );
+    }
     // If we already sent output to the user, don't roll back the cursor —
     // the user got their response and re-processing would send duplicates.
     if (outputSentToUser) {
@@ -450,7 +472,7 @@ async function runAgent(
   prompt: string,
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
-): Promise<'success' | 'error'> {
+): Promise<ContainerOutput> {
   const isMain = group.isMain === true;
   const sessionId = sessions[group.folder];
   const epoch = recoveryEpoch.get(chatJid) || 0;
@@ -522,13 +544,17 @@ async function runAgent(
         { group: group.name, error: output.error },
         'Container agent error',
       );
-      return 'error';
+      return output;
     }
 
-    return 'success';
+    return output;
   } catch (err) {
     logger.error({ group: group.name, err }, 'Agent error');
-    return 'error';
+    return {
+      status: 'error',
+      result: null,
+      errorCode: 'host_execution_failed',
+    };
   }
 }
 
@@ -950,10 +976,11 @@ async function main(): Promise<void> {
               .slice(0, 15)
               .map(
                 (s) =>
-                  `${s.groupJid}: ${s.cancelling ? 'cancelling' : s.active ? 'running' : 'idle'}; ${s.pendingTasks.length} queued tasks; messages ${s.pendingMessages ? 'waiting' : 'clear'}${activity.get(s.groupJid) ? '; ' + activity.get(s.groupJid)!.phase + ' at ' + activity.get(s.groupJid)!.at : ''}`,
+                  `${s.groupJid}: ${s.cancelling ? 'cancelling' : s.active ? 'running' : 'idle'}; retry ${s.retryScheduled ? 'scheduled' : 'none'}; ${s.pendingTasks.length} queued tasks; messages ${s.pendingMessages ? 'waiting' : 'clear'}${activity.get(s.groupJid) ? '; ' + activity.get(s.groupJid)!.phase + ' at ' + activity.get(s.groupJid)!.at : ''}`,
               )
               .join('\n')
-          : 'No active work.')
+          : 'No active work.') +
+        foregroundFailureStatus(jid)
       );
     },
     jobs: (source: string) =>

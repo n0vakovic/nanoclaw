@@ -72,3 +72,22 @@ WantedBy=timers.target
 ```
 
 Enable using `systemctl --user daemon-reload` and `systemctl --user enable --now nanoclaw-recovery.timer`. Inspect with `journalctl --user -u nanoclaw-recovery.service`. This checks host event-loop liveness; provider/model progress needs worker execution deadlines and queue evidence. An out-of-process timer cannot accept chat commands when the Telegram worker is fully down. Local recovery remains `scripts/restart.sh` plus the systemd journal.
+
+
+## Foreground failure diagnosis
+
+A failed SDK result is captured immediately, before the container's idle shutdown.
+Incidents include the SDK result UUID, model, failure category and current message
+cursor when available. A cursor can cover multiple inputs; the result UUID identifies
+the SDK result without pretending it is the initial Telegram message. Raw SDK error
+details are logged immediately in the host log as `Streamed agent failure`, with
+known configured credentials redacted and text bounded to 4,000 characters. Search
+that entry by result UUID or container name; do not publish raw logs without review.
+
+`/status` shows the latest foreground incident and whether a subsequent successful
+turn was recorded, plus whether the queue currently has a retry scheduled. The
+summary survives restart in `foreground-failures/` under the host state directory,
+with the same permissions as incidents. Successful turns clear the in-memory failure
+flag; a later normal idle shutdown does not send another failure notice. Recovery
+does not imply the originally failed work was completed, only that a later turn
+succeeded. Existing cursor/replay protection remains in place.

@@ -40,6 +40,9 @@ interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  errorCode?: string;
+  resultId?: string;
+  model?: string;
 }
 
 interface SessionEntry {
@@ -595,7 +598,20 @@ async function runQuery(
         writeOutput({
           status: failed ? 'error' : 'success',
           completed: true,
-          ...(failed ? { error: resultText || 'Agent query failed' } : {}),
+          ...(failed
+            ? {
+                error:
+                  'errors' in message
+                    ? message.errors.join('; ')
+                    : 'Agent query failed',
+                errorCode:
+                  message.subtype === 'success'
+                    ? 'sdk_result_error'
+                    : message.subtype,
+              }
+            : {}),
+          resultId: message.uuid,
+          model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
           result: resultText || null,
           newSessionId,
         });
@@ -716,6 +732,7 @@ async function main(): Promise<void> {
       result: null,
       newSessionId: sessionId,
       error: errorMessage,
+      errorCode: 'sdk_exception',
     });
     process.exit(1);
   }

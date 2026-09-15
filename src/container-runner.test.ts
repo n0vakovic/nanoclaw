@@ -94,6 +94,7 @@ vi.mock('child_process', async () => {
 
 import { runContainerAgent, ContainerOutput } from './container-runner.js';
 import { spawn } from 'child_process';
+import { logger } from './logger.js';
 import fs from 'fs';
 import type { RegisteredGroup } from './types.js';
 
@@ -128,6 +129,34 @@ describe('container-runner timeout behavior', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it('logs a streamed failure immediately even when a later turn succeeds and exits normally', async () => {
+    const onOutput = vi.fn();
+    const pending = runContainerAgent(testGroup, testInput, () => {}, onOutput);
+    emitOutputMarker(fakeProc, {
+      status: 'error',
+      completed: true,
+      result: null,
+      error: 'Provider failed test-secret-token',
+      errorCode: 'error_during_execution',
+      resultId: 'result-1',
+    });
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        error: 'Provider failed [REDACTED]',
+        resultId: 'result-1',
+      }),
+      'Streamed agent failure',
+    );
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      completed: true,
+      result: 'Recovered',
+    });
+    fakeProc.emit('close', 0);
+    expect((await pending).status).toBe('success');
+    expect(onOutput).toHaveBeenCalledTimes(2);
   });
 
   it('timeout after output resolves as success', async () => {

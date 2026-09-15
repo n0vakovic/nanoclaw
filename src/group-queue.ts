@@ -398,6 +398,7 @@ export class GroupQueue {
       groupJid,
       active: state.active,
       idleWaiting: state.idleWaiting,
+      retryScheduled: state.retryTimer !== null,
       isTaskContainer: state.isTaskContainer,
       runningTaskId: state.runningTaskId,
       pendingMessages: state.pendingMessages,
