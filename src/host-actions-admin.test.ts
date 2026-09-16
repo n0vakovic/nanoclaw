@@ -468,3 +468,16 @@ describe('admin memory host actions', () => {
     ).toBe(true);
   });
 });
+
+describe('school summary authorization', () => {
+  it.each(['schoolSummaryPrepare', 'schoolSummaryComplete'])(
+    'rejects non-main requests for %s',
+    async (action) => {
+      const result = await dispatchAction(
+        { action, requestId: 'unauthorized', params: { mode: 'daily' } },
+        { ...mainContext, isMain: false },
+      );
+      expect(result.ok).toBe(false);
+    },
+  );
+});

@@ -60,75 +60,80 @@ describe('task scheduler', () => {
     expect(task?.status).toBe('paused');
   });
 
-  it('isolates scheduled execution from foreground session and input channel', async () => {
-    createTask({
-      id: 'task-isolated',
-      group_folder: 'main',
-      chat_jid: 'chat',
-      prompt: 'Research',
-      schedule_type: 'once',
-      schedule_value: '2026-01-01T00:00:00.000Z',
-      context_mode: 'group',
-      next_run: new Date(Date.now() - 1000).toISOString(),
-      status: 'active',
-      created_at: '2026-01-01T00:00:00.000Z',
-    });
-    const proc = {} as any;
-    vi.mocked(runContainerAgent).mockImplementation(
-      async (_group, _input, onProcess, onOutput) => {
-        onProcess(proc, 'nanoclaw-scheduled');
-        await onOutput?.({ status: 'success', result: 'Done' });
-        await new Promise<void>((resolve) => setTimeout(resolve, 11_000));
-        return { status: 'success', result: 'Done' };
-      },
-    );
-    const queue = {
-      enqueueTask: vi.fn((_key, _id, fn) => {
-        void fn();
-      }),
-      registerProcess: vi.fn(),
-      closeStdin: vi.fn(),
-      notifyIdle: vi.fn(),
-    };
-    const onProcess = vi.fn();
-    const sendMessage = vi.fn(async () => {});
-    startSchedulerLoop({
-      registeredGroups: () => ({
-        chat: {
-          name: 'Main',
-          folder: 'main',
-          trigger: '@Ras',
-          added_at: '2026-01-01',
-          isMain: true,
+  it.each(['message', 'silent'] as const)(
+    'isolates scheduled execution with %s delivery',
+    async (deliveryMode) => {
+      createTask({
+        id: 'task-isolated',
+        delivery_mode: deliveryMode,
+        group_folder: 'main',
+        chat_jid: 'chat',
+        prompt: 'Research',
+        schedule_type: 'once',
+        schedule_value: '2026-01-01T00:00:00.000Z',
+        context_mode: 'group',
+        next_run: new Date(Date.now() - 1000).toISOString(),
+        status: 'active',
+        created_at: '2026-01-01T00:00:00.000Z',
+      });
+      const proc = {} as any;
+      vi.mocked(runContainerAgent).mockImplementation(
+        async (_group, _input, onProcess, onOutput) => {
+          onProcess(proc, 'nanoclaw-scheduled');
+          await onOutput?.({ status: 'success', result: 'Done' });
+          await new Promise<void>((resolve) => setTimeout(resolve, 11_000));
+          return { status: 'success', result: 'Done' };
         },
-      }),
-      getSessions: () => ({ main: 'foreground-session' }),
-      queue: queue as any,
-      onProcess,
-      sendMessage,
-    });
-    await vi.advanceTimersByTimeAsync(11_001);
-    expect(queue.enqueueTask).toHaveBeenCalledWith(
-      'scheduled:task-isolated',
-      'task-isolated',
-      expect.any(Function),
-    );
-    const input = vi.mocked(runContainerAgent).mock.calls.at(-1)![1];
-    expect(input.sessionId).toBeUndefined();
-    expect(input.executionId).toMatch(/^scheduled-task-isolated-\d+$/);
-    expect(input.groupFolder).toBe('main');
-    expect(queue.registerProcess).toHaveBeenCalledWith(
-      'scheduled:task-isolated',
-      proc,
-      'nanoclaw-scheduled',
-      'main',
-      `main/executions/${input.executionId}`,
-    );
-    expect(queue.closeStdin).toHaveBeenCalledWith('scheduled:task-isolated');
-    expect(queue.notifyIdle).toHaveBeenCalledWith('scheduled:task-isolated');
-    expect(onProcess).not.toHaveBeenCalled();
-    expect(sendMessage).toHaveBeenCalledWith('chat', 'Done');
-  });
+      );
+      const queue = {
+        enqueueTask: vi.fn((_key, _id, fn) => {
+          void fn();
+        }),
+        registerProcess: vi.fn(),
+        closeStdin: vi.fn(),
+        notifyIdle: vi.fn(),
+      };
+      const onProcess = vi.fn();
+      const sendMessage = vi.fn(async () => {});
+      startSchedulerLoop({
+        registeredGroups: () => ({
+          chat: {
+            name: 'Main',
+            folder: 'main',
+            trigger: '@Ras',
+            added_at: '2026-01-01',
+            isMain: true,
+          },
+        }),
+        getSessions: () => ({ main: 'foreground-session' }),
+        queue: queue as any,
+        onProcess,
+        sendMessage,
+      });
+      await vi.advanceTimersByTimeAsync(11_001);
+      expect(queue.enqueueTask).toHaveBeenCalledWith(
+        'scheduled:task-isolated',
+        'task-isolated',
+        expect.any(Function),
+      );
+      const input = vi.mocked(runContainerAgent).mock.calls.at(-1)![1];
+      expect(input.sessionId).toBeUndefined();
+      expect(input.executionId).toMatch(/^scheduled-task-isolated-\d+$/);
+      expect(input.groupFolder).toBe('main');
+      expect(queue.registerProcess).toHaveBeenCalledWith(
+        'scheduled:task-isolated',
+        proc,
+        'nanoclaw-scheduled',
+        'main',
+        `main/executions/${input.executionId}`,
+      );
+      expect(queue.closeStdin).toHaveBeenCalledWith('scheduled:task-isolated');
+      expect(queue.notifyIdle).toHaveBeenCalledWith('scheduled:task-isolated');
+      expect(onProcess).not.toHaveBeenCalled();
+      if (deliveryMode === 'silent') expect(sendMessage).not.toHaveBeenCalled();
+      else expect(sendMessage).toHaveBeenCalledWith('chat', 'Done');
+    },
+  );
 
   it('rechecks task status after waiting for capacity', async () => {
     createTask({

@@ -64,6 +64,11 @@ import {
   whatsappStatus,
 } from './whatsapp-workspace.js';
 
+import {
+  prepareSchoolSummary,
+  completeSchoolSummary,
+} from './whatsapp-school.js';
+
 export interface ActionRequest {
   action: string;
   requestId: string;
@@ -487,9 +492,17 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
       throw new Error('Background jobs are unavailable');
     return backgroundJobAction(params, ctx);
   },
-  whatsappStatus: async (_params, ctx) => {
+  schoolSummaryPrepare: async (params, ctx) => {
     assertMain(ctx);
-    return whatsappStatus();
+    return prepareSchoolSummary(params || {});
+  },
+  schoolSummaryComplete: async (params, ctx) => {
+    assertMain(ctx);
+    return completeSchoolSummary(params || {});
+  },
+  whatsappStatus: async (params, ctx) => {
+    assertMain(ctx);
+    return whatsappStatus(params || {});
   },
   whatsappListChats: async (params, ctx) => {
     assertMain(ctx);

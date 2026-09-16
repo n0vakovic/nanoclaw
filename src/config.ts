@@ -82,6 +82,9 @@ export const WHATSAPP_STORE_DIR =
   path.join(HOME_DIR, '.local', 'state', 'wacli');
 export const WHATSAPP_SYNC_SERVICE =
   process.env.WHATSAPP_SYNC_SERVICE || 'wacli-sync.service';
+export const WHATSAPP_ACCOUNTS_FILE =
+  process.env.WHATSAPP_ACCOUNTS_FILE ||
+  path.join(PROJECT_ROOT, 'data', 'whatsapp-accounts.json');
 export const WHATSAPP_QUERY_TIMEOUT_MS = parseInt(
   process.env.WHATSAPP_QUERY_TIMEOUT_MS || '30000',
   10,

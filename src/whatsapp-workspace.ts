@@ -8,10 +8,15 @@ import {
   WHATSAPP_MEDIA_TIMEOUT_MS,
   WHATSAPP_MAX_RESULT_BYTES,
   WHATSAPP_QUERY_TIMEOUT_MS,
-  WHATSAPP_STORE_DIR,
-  WHATSAPP_SYNC_SERVICE,
   WHATSAPP_WACLI_PATH,
 } from './config.js';
+
+import {
+  resolveWhatsAppAccount,
+  whatsappAccounts,
+  whatsappAlias,
+  type WhatsAppAccount,
+} from './whatsapp-accounts.js';
 
 const execFileAsync = promisify(execFile);
 type ExecRunner = (
@@ -56,18 +61,19 @@ function text(value: unknown, label: string, max = 256): string {
 }
 
 async function runWacli(
+  account: WhatsAppAccount,
   command: string[],
   timeout = WHATSAPP_QUERY_TIMEOUT_MS,
 ): Promise<unknown> {
   if (!path.isAbsolute(WHATSAPP_WACLI_PATH)) {
     throw new Error('whatsapp: WHATSAPP_WACLI_PATH must be absolute');
   }
-  if (!path.isAbsolute(WHATSAPP_STORE_DIR)) {
-    throw new Error('whatsapp: WHATSAPP_STORE_DIR must be absolute');
+  if (!path.isAbsolute(account.storeDir)) {
+    throw new Error('whatsapp: account.storeDir must be absolute');
   }
   const { stdout } = await execute(
     WHATSAPP_WACLI_PATH,
-    ['--store', WHATSAPP_STORE_DIR, '--read-only', '--json', ...command],
+    ['--store', account.storeDir, '--read-only', '--json', ...command],
     {
       timeout,
       maxBuffer: WHATSAPP_MAX_RESULT_BYTES,
@@ -119,14 +125,19 @@ function messageView(message: JsonRecord) {
   };
 }
 
-async function listRaw(query?: string, limit = 50): Promise<JsonRecord[]> {
+async function listRaw(
+  account: WhatsAppAccount,
+  query?: string,
+  limit = 50,
+): Promise<JsonRecord[]> {
   const args = ['chats', 'list', '--limit', String(limit)];
   if (query) args.push('--query', query);
-  const data = await runWacli(args);
+  const data = await runWacli(account, args);
   return Array.isArray(data) ? (data as JsonRecord[]) : [];
 }
 
 async function readRaw(
+  account: WhatsAppAccount,
   chatId: string,
   limit: number,
   after?: string,
@@ -135,17 +146,17 @@ async function readRaw(
   const args = ['messages', 'list', '--chat', chatId, '--limit', String(limit)];
   if (after) args.push('--after', after);
   if (before) args.push('--before', before);
-  const data = record(await runWacli(args), 'messages');
+  const data = record(await runWacli(account, args), 'messages');
   return Array.isArray(data.messages) ? (data.messages as JsonRecord[]) : [];
 }
 
-async function serviceState(): Promise<string> {
-  if (!/^[A-Za-z0-9_.@-]+\.service$/.test(WHATSAPP_SYNC_SERVICE))
+async function serviceState(account: WhatsAppAccount): Promise<string> {
+  if (!/^[A-Za-z0-9_.@-]+\.service$/.test(account.syncService))
     return 'unknown';
   try {
     const { stdout } = await execute(
       'systemctl',
-      ['--user', 'is-active', WHATSAPP_SYNC_SERVICE],
+      ['--user', 'is-active', account.syncService],
       { timeout: 5000, maxBuffer: 4096, encoding: 'utf8' },
     );
     return stdout.trim() === 'active' ? 'running' : 'stopped';
@@ -154,12 +165,18 @@ async function serviceState(): Promise<string> {
   }
 }
 
-export async function whatsappStatus(): Promise<string> {
-  const data = record(await runWacli(['doctor']), 'doctor');
+export async function whatsappStatus(params: JsonRecord = {}): Promise<string> {
+  const account = resolveWhatsAppAccount(params);
+  const data = record(await runWacli(account, ['doctor']), 'doctor');
   const store = record(data.store || {}, 'store');
   return bounded({
+    account: account.id,
+    availableAccounts: whatsappAccounts().map(({ id, aliases }) => ({
+      account: id,
+      aliases,
+    })),
     authenticated: data.authenticated === true,
-    serviceState: await serviceState(),
+    serviceState: await serviceState(account),
     ftsEnabled: data.fts_enabled === true,
     lockHeld: data.lock_held === true,
     lastSyncAt: store.last_sync_at || null,
@@ -174,16 +191,20 @@ export async function whatsappStatus(): Promise<string> {
 }
 
 export async function whatsappListChats(params: JsonRecord): Promise<string> {
+  const account = resolveWhatsAppAccount(params);
   const query =
     params.query === undefined ? undefined : text(params.query, 'query');
   const limit = integer(params.limit, 20, 50);
-  const chats = (await listRaw(query, limit)).map(chatView);
+  const chats = (await listRaw(account, query, limit)).map(chatView);
   return bounded({
+    account: account.id,
+    aliases: account.aliases,
     chats: chats.filter((c) => params.includeArchived === true || !c.archived),
   });
 }
 
 export async function whatsappRead(params: JsonRecord): Promise<string> {
+  const account = resolveWhatsAppAccount(params);
   const names = params.chatNames;
   const recent = params.recentChatCount;
   if ((names === undefined) === (recent === undefined)) {
@@ -198,6 +219,7 @@ export async function whatsappRead(params: JsonRecord): Promise<string> {
   const selected: Array<{
     chat: JsonRecord;
     requested?: string;
+    alias?: boolean;
     error?: string;
     candidates?: unknown[];
   }> = [];
@@ -208,7 +230,20 @@ export async function whatsappRead(params: JsonRecord): Promise<string> {
     }
     for (const value of names) {
       const requested = text(value, 'chat name', 200);
-      const matches = await listRaw(requested, 20);
+      const alias = whatsappAlias(account, requested);
+      if (alias) {
+        selected.push({
+          requested,
+          alias: true,
+          chat: {
+            jid: alias.chatId,
+            name: alias.name,
+            kind: alias.chatId.endsWith('@g.us') ? 'group' : 'dm',
+          },
+        });
+        continue;
+      }
+      const matches = await listRaw(account, requested, 20);
       const normalized = requested.toLocaleLowerCase();
       const exact = matches.filter(
         (c) =>
@@ -229,7 +264,7 @@ export async function whatsappRead(params: JsonRecord): Promise<string> {
     }
   } else {
     const count = integer(recent, 10, 20);
-    const chats = await listRaw(undefined, 1000);
+    const chats = await listRaw(account, undefined, 1000);
     chats.sort((a, b) =>
       String(b.last_message_ts || '').localeCompare(
         String(a.last_message_ts || ''),
@@ -251,12 +286,25 @@ export async function whatsappRead(params: JsonRecord): Promise<string> {
         candidates: item.candidates,
       };
     const view = chatView(item.chat);
-    if (view.coverage === 'metadata_only') return { ...view, messages: [] };
+    if (!item.alias && view.coverage === 'metadata_only')
+      return { ...view, messages: [] };
     try {
-      const messages = (await readRaw(view.chatId, perChat, after, before))
+      const messages = (
+        await readRaw(account, view.chatId, perChat, after, before)
+      )
         .map(messageView)
         .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-      return { ...view, messages };
+      return {
+        ...view,
+        coverage: messages.length
+          ? 'ready'
+          : item.alias
+            ? 'no_matching_messages'
+            : view.coverage,
+        messages,
+        returnedMessageCount: messages.length,
+        limitReached: messages.length === perChat,
+      };
     } catch (error) {
       return {
         ...view,
@@ -266,8 +314,9 @@ export async function whatsappRead(params: JsonRecord): Promise<string> {
     }
   });
   return bounded({
+    account: account.id,
     fetchedAt: new Date().toISOString(),
-    serviceState: await serviceState(),
+    serviceState: await serviceState(account),
     chats,
   });
 }
@@ -291,6 +340,7 @@ async function mapLimit<T, R>(
 }
 
 export async function whatsappSearch(params: JsonRecord): Promise<string> {
+  const account = resolveWhatsAppAccount(params);
   const query = text(params.query, 'query');
   const limit = integer(params.limit, 20, 50);
   const args = ['messages', 'search', query, '--limit', String(limit)];
@@ -299,16 +349,24 @@ export async function whatsappSearch(params: JsonRecord): Promise<string> {
     ['after', '--after'],
     ['before', '--before'],
   ] as const) {
-    if (params[key] !== undefined) args.push(flag, text(params[key], key, 256));
+    if (params[key] !== undefined) {
+      const value = text(params[key], key, 256);
+      args.push(
+        flag,
+        key === 'chatId'
+          ? (whatsappAlias(account, value)?.chatId ?? value)
+          : value,
+      );
+    }
   }
   if (params.hasMedia === true) args.push('--has-media');
   if (params.mediaType !== undefined)
     args.push('--type', text(params.mediaType, 'mediaType', 20));
-  const data = record(await runWacli(args), 'search');
+  const data = record(await runWacli(account, args), 'search');
   const messages = Array.isArray(data.messages)
     ? data.messages.map((m) => messageView(record(m, 'message')))
     : [];
-  return bounded({ fts: data.fts === true, messages });
+  return bounded({ account: account.id, fts: data.fts === true, messages });
 }
 
 function sourceId(value: unknown, label: string): string {
@@ -348,6 +406,7 @@ function mediaExtension(message: JsonRecord): string {
 export interface WhatsAppMediaDownload {
   hostPath: string;
   publicResult: {
+    account: string;
     chatId: string;
     messageId: string;
     mediaPath: string;
@@ -361,10 +420,22 @@ export async function downloadWhatsAppMedia(
   params: JsonRecord,
   groupIpcDir: string,
 ): Promise<WhatsAppMediaDownload> {
-  const chatId = sourceId(params.chatId, 'chatId');
+  const account = resolveWhatsAppAccount(params);
+  const chatRef = text(params.chatId, 'chatId');
+  const chatId = sourceId(
+    whatsappAlias(account, chatRef)?.chatId ?? chatRef,
+    'chatId',
+  );
   const messageId = sourceId(params.messageId, 'messageId');
   const shown = record(
-    await runWacli(['messages', 'show', '--chat', chatId, '--id', messageId]),
+    await runWacli(account, [
+      'messages',
+      'show',
+      '--chat',
+      chatId,
+      '--id',
+      messageId,
+    ]),
     'message',
   );
   const message = record(shown.message || shown, 'message');
@@ -377,6 +448,7 @@ export async function downloadWhatsAppMedia(
   const filename = `whatsapp-${Date.now()}-${randomUUID().slice(0, 8)}${mediaExtension(message)}`;
   const outputPath = path.join(mediaDir, filename);
   await runWacli(
+    account,
     [
       'media',
       'download',
@@ -405,6 +477,7 @@ export async function downloadWhatsAppMedia(
   return {
     hostPath: realPath,
     publicResult: {
+      account: account.id,
       chatId,
       messageId,
       mediaPath: `/workspace/ipc/media/${filename}`,
@@ -432,4 +505,34 @@ function bounded(value: unknown): string {
     throw new Error('whatsapp: result exceeds configured output limit');
   }
   return output;
+}
+
+// Host-only automation reader; never exposed as an arbitrary command tool.
+export async function readWhatsAppAutomationMessages(
+  accountId: string,
+  chatId: string,
+  after: string,
+): Promise<ReturnType<typeof messageView>[]> {
+  const account = resolveWhatsAppAccount({ account: accountId });
+  const data = record(
+    await runWacli(account, [
+      'messages',
+      'list',
+      '--chat',
+      sourceId(chatId, 'chatId'),
+      '--after',
+      text(after, 'after'),
+      '--limit',
+      '1001',
+    ]),
+    'messages',
+  );
+  const messages = Array.isArray(data.messages) ? data.messages : [];
+  if (messages.length > 1000)
+    throw new Error(
+      'School summary history exceeds 1000 messages; narrow the configured start time after reviewing the backlog',
+    );
+  return messages
+    .map((message) => messageView(record(message, 'message')))
+    .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 }
