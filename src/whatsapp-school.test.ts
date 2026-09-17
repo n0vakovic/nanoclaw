@@ -119,6 +119,37 @@ describe('school summaries', () => {
     expect((await prepare('on_demand')).messages).toHaveLength(2);
   });
 
+  it('always sends an empty scheduled digest and deduplicates its completion', async () => {
+    const first = await prepare();
+    await completeSchoolSummary({
+      snapshotId: first.snapshotId,
+      text: 'Novosti.',
+      messageIds: ['m1', 'm2'],
+    });
+    const empty = await prepare();
+    expect(empty.messages).toHaveLength(0);
+    send.mockClear();
+    const result = JSON.parse(
+      await completeSchoolSummary({ snapshotId: empty.snapshotId }),
+    );
+    expect(result.status).toBe('sent');
+    expect(send).toHaveBeenCalledExactlyOnceWith(
+      '/tmp/default-school-store',
+      '222@g.us',
+      expect.stringContaining('Nema novih poruka od prethodnog pregleda.'),
+    );
+    await completeSchoolSummary({ snapshotId: empty.snapshotId });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects silently skipping routine messages in a normal scheduled summary', async () => {
+    const snapshot = await prepare();
+    await expect(
+      completeSchoolSummary({ snapshotId: snapshot.snapshotId }),
+    ).rejects.toThrow('cannot be skipped');
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it('keeps routine news for daily review after a quiet hourly check', async () => {
     const snapshot = await prepare('urgent');
     expect(

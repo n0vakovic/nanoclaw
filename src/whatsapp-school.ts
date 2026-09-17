@@ -158,6 +158,8 @@ export function schoolSummaryCoverage(
     .map((message) => Date.parse(message.timestamp))
     .filter(Number.isFinite)
     .sort((a, b) => a - b);
+  if (!messages.length)
+    return 'Pregledane su dostupne sinhronizovane poruke; nema novih poruka za ovaj pregled.';
   const range = times.length
     ? `${format.format(times[0])} – ${format.format(times[times.length - 1])} (${timezone})`
     : 'vreme nije dostupno';
@@ -268,9 +270,10 @@ export function completeSchoolSummary(
       throw new Error(
         'School summary snapshot expired or configuration changed; prepare again',
       );
-    const text = params.text === undefined ? '' : params.text;
-    if (typeof text !== 'string' || text.length > 6000)
+    const requestedText = params.text === undefined ? '' : params.text;
+    if (typeof requestedText !== 'string' || requestedText.length > 6000)
       throw new Error('Invalid school summary text');
+    let text: string = requestedText;
     const ids = params.messageIds ?? [];
     if (
       !Array.isArray(ids) ||
@@ -280,7 +283,15 @@ export function completeSchoolSummary(
       )
     )
       throw new Error('School summary must cite message IDs from its snapshot');
-    if (text.trim() && ids.length === 0)
+    const emptyScheduledDigest =
+      snapshot.mode === 'daily' && snapshot.messages.length === 0;
+    if (emptyScheduledDigest)
+      text = 'Nema novih poruka od prethodnog pregleda.';
+    if (snapshot.mode === 'daily' && !text.trim())
+      throw new Error(
+        'Scheduled morning/evening summaries cannot be skipped. Summarize the available messages, including routine updates.',
+      );
+    if (text.trim() && ids.length === 0 && !emptyScheduledDigest)
       throw new Error('School summary needs at least one supporting message');
     if (
       text.trim() &&

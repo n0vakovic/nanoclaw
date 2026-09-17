@@ -99,11 +99,13 @@ Configure the local, git-ignored `data/whatsapp-school.json`:
 }
 ```
 
-After building, `node scripts/setup-school-summaries.mjs` installs a daily
-18:00 digest and hourly checks. It verifies that NanoClaw's scheduler timezone
+After building, `node scripts/setup-school-summaries.mjs` installs normal summaries at
+08:00 and 18:00 Lisbon time, plus hourly urgent checks. Scheduled normal summaries
+always send, including routine news; empty snapshots send a Serbian no-updates
+message. Only hourly urgent checks may silently skip. It verifies that NanoClaw's scheduler timezone
 matches the configured timezone. Add `--test-now` to run the daily workflow
-immediately; this sends a real summary if useful new messages exist. Existing
-schedules are preserved when rerunning setup. Tasks run as isolated main-group
+immediately; this sends a real summary if useful new messages exist. Rerunning setup updates these two schedules and prompts while preserving their
+active/paused status. Tasks run as isolated main-group
 sessions with `delivery_mode: silent`, so internal completion text is logged
 without also being sent to the main conversation.
 
