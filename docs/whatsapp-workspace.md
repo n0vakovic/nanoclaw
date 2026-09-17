@@ -129,3 +129,19 @@ intent is saved before calling wacli. If delivery fails or is uncertain, future
 sends pause to avoid duplicates. Inspect the destination and saved `inFlight`
 text before manually reconciling the state—never blindly clear it and resend.
 The sync daemon stays running: wacli delegates sends through its normal send path.
+
+### School email source
+
+Optionally add `"gmail": { "alias": "work_mail", "senderDomain": "edu.pt" }`
+to `data/whatsapp-school.json`. The alias must already have read/search access
+for the main assistant group in the host Google policy. Email reads use the
+existing read-only gogcli broker and its group authorization; the automation
+cannot select another mailbox. Matching checks actual sender addresses against
+`edu.pt` and its subdomains, not display names or body mentions.
+
+Matching messages in the same lookback window are read in full and included in
+all three summary modes. Gmail records use namespaced IDs and the same durable
+review/delivery tracking as WhatsApp. The agent distinguishes teacher email
+from parent discussion, consolidates overlap, and preserves optional suggestions.
+Email body text is included; unread attachment contents must not be inferred.
+Unreadable email or a capped search fails instead of falsely saying no updates.

@@ -5,6 +5,7 @@ import path from 'path';
 import { promisify } from 'util';
 
 import { DATA_DIR, WHATSAPP_WACLI_PATH } from './config.js';
+import { readSchoolEmails, type SchoolEmailConfig } from './school-email.js';
 import { resolveWhatsAppAccount } from './whatsapp-accounts.js';
 import { readWhatsAppAutomationMessages } from './whatsapp-workspace.js';
 
@@ -13,6 +14,7 @@ type Message = Awaited<
   ReturnType<typeof readWhatsAppAutomationMessages>
 >[number];
 interface SchoolConfig {
+  gmail?: SchoolEmailConfig;
   source: { account: string; chatId: string; name: string };
   destination: { account: string; chatId: string; name: string };
   startAt: string;
@@ -125,7 +127,11 @@ function save(state: State) {
   fs.renameSync(tmp, statePath());
 }
 function route(settings: SchoolConfig) {
-  return JSON.stringify([settings.source, settings.destination]);
+  return JSON.stringify([
+    settings.source,
+    settings.destination,
+    settings.gmail,
+  ]);
 }
 function fingerprint(message: Message) {
   return createHash('sha256')
@@ -168,6 +174,7 @@ export function schoolSummaryCoverage(
 
 export function prepareSchoolSummary(
   params: Record<string, unknown>,
+  sourceGroup?: string,
 ): Promise<string> {
   return exclusive(async () => {
     const mode = params.mode;
@@ -183,10 +190,22 @@ export function prepareSchoolSummary(
       Date.parse(settings.startAt),
       Date.now() - 7 * 86400_000,
     );
-    const source = await read(
+    const whatsapp = await read(
       settings.source.account,
       settings.source.chatId,
       new Date(start).toISOString(),
+    );
+    if (settings.gmail && !sourceGroup)
+      throw new Error('School email reads require the authorized source group');
+    const emails = settings.gmail
+      ? await readSchoolEmails(
+          settings.gmail,
+          sourceGroup!,
+          new Date(start).toISOString(),
+        )
+      : [];
+    const source = [...whatsapp, ...emails].sort((a, b) =>
+      a.timestamp.localeCompare(b.timestamp),
     );
     const delivered = new Set(state.delivered);
     const reviewed = new Set(mode === 'on_demand' ? [] : state.reviewed[mode]);
@@ -230,6 +249,8 @@ export function prepareSchoolSummary(
       language: settings.language,
       timezone: settings.timezone,
       source: settings.source,
+      emailSource: settings.gmail,
+      sourceCounts: { whatsapp: whatsapp.length, email: emails.length },
       destination: settings.destination,
       fetchedAt: now,
       lookbackStart: new Date(start).toISOString(),

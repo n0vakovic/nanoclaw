@@ -494,7 +494,7 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
   },
   schoolSummaryPrepare: async (params, ctx) => {
     assertMain(ctx);
-    return prepareSchoolSummary(params || {});
+    return prepareSchoolSummary(params || {}, ctx.sourceGroup);
   },
   schoolSummaryComplete: async (params, ctx) => {
     assertMain(ctx);
