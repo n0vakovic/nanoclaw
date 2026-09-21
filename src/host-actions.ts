@@ -846,6 +846,7 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
    * params.voice_id: ElevenLabs voice ID or known voice name (lenient — names
    *   accepted here too so existing callers passing "vlad" as voice_id work)
    * params.voice: named voice from VOICES map (e.g. 'lucy', 'vlad')
+   * params.speed: optional narration speed (0.7–1.2, defaults to 1.0)
    * params.model_id: optional model (defaults to eleven_turbo_v2_5)
    * Resolution: voice_id (as ID or name) > VOICES[voice] > ELEVENLABS_VOICE_ID env
    *
@@ -865,13 +866,30 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
     const apiKey = process.env.ELEVENLABS_API_KEY || envVars.ELEVENLABS_API_KEY;
     if (!apiKey) throw new Error('ELEVENLABS_API_KEY not set');
 
-    const { text, voice_id, voice, model_id } = params as {
+    const {
+      text,
+      voice_id,
+      voice,
+      model_id,
+      speed = 1.0,
+    } = params as {
       text: string;
       voice_id?: string;
       voice?: string;
       model_id?: string;
+      speed?: number;
     };
     if (!text) throw new Error('ttsSpeak: missing params.text');
+    if (
+      typeof speed !== 'number' ||
+      !Number.isFinite(speed) ||
+      speed < 0.7 ||
+      speed > 1.2
+    ) {
+      throw new Error(
+        'ttsSpeak: params.speed must be a number between 0.7 and 1.2 (1.0 = normal)',
+      );
+    }
 
     if (voice && !VOICES[voice]) {
       throw new Error(
@@ -899,6 +917,7 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
       text,
       voiceId,
       modelId: model_id ?? 'eleven_turbo_v2_5',
+      speed,
       timeoutMs: TTS_FETCH_TIMEOUT_MS,
       context: {
         hostActionRequestId: ctx?.requestId,

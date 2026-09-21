@@ -136,6 +136,14 @@ server.tool(
       .describe(
         'The text to speak. Write for natural speech — no markdown, no bullets, no headers.',
       ),
+    speed: z
+      .number()
+      .min(0.7)
+      .max(1.2)
+      .optional()
+      .describe(
+        'Narration speed from 0.7 (slowest) to 1.2 (fastest). Defaults to 1.0 (normal). Values below 1 slow speech; values above 1 speed it up.',
+      ),
     voice: z
       .enum(['lucy', 'funny-nigerian', 'indian', 'vlad'])
       .optional()
@@ -154,7 +162,11 @@ server.tool(
       // IPC wait longer so the fresh-connection result is not falsely orphaned.
       const output = await requestHostAction(
         'ttsSpeak',
-        { text: args.text, ...(args.voice ? { voice: args.voice } : {}) },
+        {
+          text: args.text,
+          ...(args.voice ? { voice: args.voice } : {}),
+          ...(args.speed !== undefined ? { speed: args.speed } : {}),
+        },
         75_000,
       );
       const { audioPath } = JSON.parse(output);

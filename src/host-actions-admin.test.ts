@@ -68,45 +68,75 @@ beforeEach(() => {
 });
 
 describe('TTS host action', () => {
-  it('correlates the host action request and writes generated audio', async () => {
-    const groupIpcDir = path.join(testPaths.base, 'ipc', 'telegram_main');
-    vi.stubEnv('ELEVENLABS_API_KEY', 'test-eleven-key');
-    synthesizeSpeechDetailedMock.mockResolvedValue({
-      audio: Buffer.from('mp3 bytes'),
-      diagnostic: { classification: 'tts_succeeded' },
-    });
+  it.each([0.5, 1.21, 0, -1, '0.8', null, NaN, Infinity])(
+    'rejects invalid speed %s before synthesis',
+    async (speed) => {
+      vi.stubEnv('ELEVENLABS_API_KEY', 'test-eleven-key');
+      try {
+        const result = await dispatchAction(
+          {
+            action: 'ttsSpeak',
+            requestId: 'invalid-speed',
+            params: { text: 'Hello', voice: 'vlad', speed },
+          },
+          mainContext,
+        );
+        expect(result.ok).toBe(false);
+        expect(result.output).toContain(
+          'params.speed must be a number between 0.7 and 1.2',
+        );
+        expect(synthesizeSpeechDetailedMock).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 
-    const result = await dispatchAction(
-      {
-        action: 'ttsSpeak',
-        requestId: 'tts-request-1',
-        params: { text: 'Hello', voice: 'vlad' },
-      },
-      { ...mainContext, groupIpcDir },
-    );
+  it.each([undefined, 0.7, 0.85, 1.0, 1.2])(
+    'writes generated audio with speed %s',
+    async (speed) => {
+      const groupIpcDir = path.join(testPaths.base, 'ipc', 'telegram_main');
+      vi.stubEnv('ELEVENLABS_API_KEY', 'test-eleven-key');
+      synthesizeSpeechDetailedMock.mockResolvedValue({
+        audio: Buffer.from('mp3 bytes'),
+        diagnostic: { classification: 'tts_succeeded' },
+      });
 
-    expect(result.ok).toBe(true);
-    const output = JSON.parse(result.output) as { audioPath: string };
-    expect(output.audioPath).toMatch(/^\/workspace\/ipc\/media\/tts-.*\.mp3$/);
-    expect(synthesizeSpeechDetailedMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        apiKey: 'test-eleven-key',
-        text: 'Hello',
-        voiceId: 'XjdmlV0OFXfXE6Mg2Sb7',
-        timeoutMs: 30000,
-        context: {
-          hostActionRequestId: 'tts-request-1',
-          sourceGroup: 'telegram_main',
+      const result = await dispatchAction(
+        {
+          action: 'ttsSpeak',
+          requestId: 'tts-request-1',
+          params: { text: 'Hello', voice: 'vlad', speed },
         },
-      }),
-    );
-    const hostAudioPath = path.join(
-      groupIpcDir,
-      output.audioPath.replace('/workspace/ipc/', ''),
-    );
-    expect(fs.readFileSync(hostAudioPath)).toEqual(Buffer.from('mp3 bytes'));
-    vi.unstubAllEnvs();
-  });
+        { ...mainContext, groupIpcDir },
+      );
+
+      expect(result.ok).toBe(true);
+      const output = JSON.parse(result.output) as { audioPath: string };
+      expect(output.audioPath).toMatch(
+        /^\/workspace\/ipc\/media\/tts-.*\.mp3$/,
+      );
+      expect(synthesizeSpeechDetailedMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          apiKey: 'test-eleven-key',
+          text: 'Hello',
+          voiceId: 'XjdmlV0OFXfXE6Mg2Sb7',
+          speed: speed ?? 1.0,
+          timeoutMs: 30000,
+          context: {
+            hostActionRequestId: 'tts-request-1',
+            sourceGroup: 'telegram_main',
+          },
+        }),
+      );
+      const hostAudioPath = path.join(
+        groupIpcDir,
+        output.audioPath.replace('/workspace/ipc/', ''),
+      );
+      expect(fs.readFileSync(hostAudioPath)).toEqual(Buffer.from('mp3 bytes'));
+      vi.unstubAllEnvs();
+    },
+  );
 });
 
 describe('audio transcription host action', () => {

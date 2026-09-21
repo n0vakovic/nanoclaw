@@ -59,6 +59,29 @@ beforeEach(() => {
 });
 
 describe('ElevenLabs TTS diagnostics', () => {
+  it.each([undefined, 0.7, 0.85, 1.0, 1.2])(
+    'sends speed %s in voice settings, including on retry',
+    async (speed) => {
+      undiciFetchMock
+        .mockRejectedValueOnce(new Error('connection reset'))
+        .mockResolvedValueOnce(new Response(Buffer.from('mp3 bytes')));
+      const outcome = await synthesizeSpeechDetailed({ ...baseOptions, speed });
+      expect(outcome.audio).toEqual(Buffer.from('mp3 bytes'));
+      expect(undiciFetchMock).toHaveBeenCalledTimes(2);
+      for (const [, options] of undiciFetchMock.mock.calls) {
+        expect(JSON.parse(options.body)).toEqual({
+          text: baseOptions.text,
+          model_id: baseOptions.modelId,
+          voice_settings: {
+            stability: 0.5,
+            similarity_boost: 0.75,
+            speed: speed ?? 1.0,
+          },
+        });
+      }
+    },
+  );
+
   it('records request phases, request ID, and audio bytes on success', async () => {
     undiciFetchMock.mockImplementation(async () => {
       publishRequestPhases({ bodySent: true, headers: 200 });

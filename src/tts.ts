@@ -156,6 +156,7 @@ async function runSynthesisAttempt(options: {
   voiceId: string;
   modelId: string;
   timeoutMs: number;
+  speed?: number;
   context?: Record<string, unknown>;
 }): Promise<TtsOutcome> {
   const { apiKey, text, voiceId, modelId, timeoutMs } = options;
@@ -187,7 +188,11 @@ async function runSynthesisAttempt(options: {
           body: JSON.stringify({
             text,
             model_id: modelId,
-            voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+            voice_settings: {
+              stability: 0.5,
+              similarity_boost: 0.75,
+              speed: options.speed ?? 1.0,
+            },
           }),
           dispatcher: disposable.dispatcher,
         },
@@ -275,6 +280,7 @@ export async function synthesizeSpeechDetailed(options: {
   voiceId: string;
   modelId: string;
   timeoutMs: number;
+  speed?: number;
   context?: Record<string, unknown>;
 }): Promise<TtsOutcome> {
   const primary = await runSynthesisAttempt(options);
