@@ -481,3 +481,29 @@ describe('school summary authorization', () => {
     },
   );
 });
+
+it('restricts school conversation context to both the configured group folder and chat', async () => {
+  fs.mkdirSync(testPaths.dataDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(testPaths.dataDir, 'whatsapp-school.json'),
+    JSON.stringify({
+      destination: { account: 'default', chatId: '123@g.us', name: 'Family' },
+      conversation: {
+        enabled: true,
+        groupFolder: 'whatsapp_school',
+        emailSourceGroup: 'telegram_main',
+      },
+    }),
+  );
+  for (const [sourceGroup, sourceChatJid] of [
+    ['other', '123@g.us'],
+    ['whatsapp_school', '456@g.us'],
+  ]) {
+    const result = await dispatchAction(
+      { action: 'schoolConversationContext', requestId: 'family-denied' },
+      { ...mainContext, isMain: false, sourceGroup, sourceChatJid },
+    );
+    expect(result.ok).toBe(false);
+    expect(result.output).toContain('restricted');
+  }
+});

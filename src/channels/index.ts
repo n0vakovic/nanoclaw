@@ -11,3 +11,5 @@
 import './telegram.js';
 
 // whatsapp
+
+import './whatsapp-wacli.js';

@@ -69,6 +69,8 @@ import {
   completeSchoolSummary,
 } from './whatsapp-school.js';
 
+import { rasConversation } from './channels/whatsapp-wacli.js';
+
 export interface ActionRequest {
   action: string;
   requestId: string;
@@ -491,6 +493,22 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
     if (!backgroundJobAction || !ctx?.sourceGroup)
       throw new Error('Background jobs are unavailable');
     return backgroundJobAction(params, ctx);
+  },
+  schoolConversationContext: async (_params, ctx) => {
+    const conversation = rasConversation();
+    if (
+      !ctx ||
+      !conversation ||
+      ctx.sourceGroup !== conversation.groupFolder ||
+      ctx.sourceChatJid !== conversation.chatId
+    )
+      throw new Error(
+        'School context is restricted to the configured family group',
+      );
+    return prepareSchoolSummary(
+      { mode: 'on_demand' },
+      conversation.emailSourceGroup,
+    );
   },
   schoolSummaryPrepare: async (params, ctx) => {
     assertMain(ctx);

@@ -145,3 +145,27 @@ review/delivery tracking as WhatsApp. The agent distinguishes teacher email
 from parent discussion, consolidates overlap, and preserves optional suggestions.
 Email body text is included; unread attachment contents must not be inferred.
 Unreadable email or a capped search fails instead of falsely saying no updates.
+
+## Typed @Ras family conversation
+
+An opt-in `whatsapp-wacli` channel polls the existing destination account's
+synced messages every five seconds. Configure `conversation` in the local
+school config with `enabled: true`, a dedicated `groupFolder`, and an
+`emailSourceGroup` already authorized to read the school mailbox. Register the
+destination as a non-main group with `requiresTrigger: false`: the channel
+itself admits only messages containing the typed `@Ras` trigger. Both outgoing
+human messages and other group members' messages can trigger it. Its own robot
+replies are excluded. New installations start listening from activation time;
+processed message IDs and the cursor persist across restarts.
+
+Replies appear from the existing account, prefixed `🤖 Ras`. Only the configured
+destination is owned by this channel. The family agent can use
+`school_conversation_context` for the last 24 hours of school messages/emails
+and recent summaries, without gaining main-agent privileges. Reply naturally
+instead of using the main-only summary-sending tools. General access to the
+owner's other Gmail, WhatsApp archives, or administrative tools is not granted.
+
+The polling cursor and uncertain reply intent are kept in the local
+`data/whatsapp-conversation-state.json`. An uncertain send blocks further
+replies until reconciled, to avoid duplicate messages. Delivery depends on the
+existing wacli sync service and NanoClaw being running.
