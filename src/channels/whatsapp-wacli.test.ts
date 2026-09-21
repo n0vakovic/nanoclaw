@@ -95,3 +95,25 @@ it('restricts replies to the configured group and blocks retry after ambiguous f
   );
   expect(run).toHaveBeenCalledTimes(1);
 });
+
+it('accepts the null message list returned by wacli when no new messages exist', async () => {
+  const run = vi.fn(async () => ({
+    stdout: JSON.stringify({ success: true, data: { messages: null } }),
+  }));
+  const opts = {
+    onMessage: vi.fn(),
+    onChatMetadata: vi.fn(),
+    registeredGroups: () => ({
+      '123@g.us': {
+        name: 'Family',
+        folder: 'whatsapp_school',
+        trigger: '@Ras',
+        added_at: 'today',
+      },
+    }),
+  };
+  await expect(
+    new WacliConversationChannel(config, opts, run).poll(),
+  ).resolves.toBeUndefined();
+  expect(opts.onMessage).not.toHaveBeenCalled();
+});

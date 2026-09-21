@@ -121,7 +121,7 @@ export class WacliConversationChannel implements Channel {
       '--limit',
       '1000',
     ]);
-    const messages = result.messages;
+    const messages = result?.messages ?? [];
     if (!Array.isArray(messages))
       throw new Error('Invalid wacli conversation messages');
     if (messages.length >= 1000)
