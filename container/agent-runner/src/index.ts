@@ -22,6 +22,7 @@ import {
   PreCompactHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
+import { ReplyCollector } from './reply-collector.js';
 
 interface ContainerInput {
   prompt: string;
@@ -136,18 +137,6 @@ function writeOutput(
 
 function log(message: string): void {
   console.error(`[agent-runner] ${message}`);
-}
-
-function extractAssistantText(message: unknown): string | null {
-  if (!message || typeof message !== 'object') return null;
-  const record = message as {
-    message?: { content?: Array<{ type?: string; text?: string }> };
-  };
-  const parts = record.message?.content
-    ?.filter((block) => block.type === 'text' && typeof block.text === 'string')
-    .map((block) => block.text?.trim())
-    .filter((text): text is string => !!text);
-  return parts?.length ? parts.join('\n\n') : null;
 }
 
 function getSessionSummary(
@@ -441,7 +430,7 @@ async function runQuery(
 
   let newSessionId: string | undefined;
   let lastAssistantUuid: string | undefined;
-  let pendingAssistantText: string | null = null;
+  const replyCollector = new ReplyCollector();
   let messageCount = 0;
   let resultCount = 0;
 
@@ -565,10 +554,7 @@ async function runQuery(
 
       if (message.type === 'assistant' && 'uuid' in message) {
         lastAssistantUuid = (message as { uuid: string }).uuid;
-        const assistantText = extractAssistantText(message);
-        if (assistantText) {
-          pendingAssistantText = assistantText;
-        }
+        replyCollector.add(message);
       }
 
       if (message.type === 'system' && message.subtype === 'init') {
@@ -593,7 +579,7 @@ async function runQuery(
         resultCount++;
         const textResult =
           'result' in message ? (message as { result?: string }).result : null;
-        const resultText = textResult || pendingAssistantText;
+        const resultText = replyCollector.finish(textResult);
         log(`Result #${resultCount}: subtype=${message.subtype}`);
         const failed = message.subtype !== 'success' || message.is_error;
         writeOutput({ type: 'progress', phase: 'result' });
@@ -617,7 +603,6 @@ async function runQuery(
           result: resultText || null,
           newSessionId,
         });
-        pendingAssistantText = null;
       }
     }
   } finally {
