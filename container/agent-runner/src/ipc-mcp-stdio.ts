@@ -134,7 +134,13 @@ server.tool(
     text: z
       .string()
       .describe(
-        'The text to speak using Eleven v4. Write for natural speech — no markdown, no bullets, no headers. Use occasional audio tags such as [excited], [laughs], [sighs], or [whispers] when appropriate; put them directly in the text as delivery cues.',
+        'The text to speak. Write for natural speech — no markdown, no bullets, no headers. The default Turbo v2.5 model does NOT support emotion/audio tags: omit tags from default-model text. Only when model_id is eleven_v4, you may include delivery cues such as [excited], [laughs], [sighs], or [whispers].',
+      ),
+    model_id: z
+      .enum(['eleven_turbo_v2_5', 'eleven_v4'])
+      .optional()
+      .describe(
+        'Omit for Eleven Turbo v2.5, the preferred default voice sound; it does not support emotion/audio tags. Select eleven_v4 only when requested for expressive audio tags; voices can sound different.',
       ),
     speed: z
       .number()
@@ -165,6 +171,7 @@ server.tool(
         'ttsSpeak',
         {
           text: args.text,
+          ...(args.model_id ? { model_id: args.model_id } : {}),
           ...(args.voice ? { voice: args.voice } : {}),
           ...(args.speed !== undefined ? { speed: args.speed } : {}),
         },

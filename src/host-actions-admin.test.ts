@@ -68,6 +68,42 @@ beforeEach(() => {
 });
 
 describe('TTS host action', () => {
+  it.each(['eleven_turbo_v2_5', 'eleven_v4', 'invalid-model'])(
+    'handles explicit model %s',
+    async (model_id) => {
+      vi.stubEnv('ELEVENLABS_API_KEY', 'test-eleven-key');
+      synthesizeSpeechDetailedMock.mockResolvedValue({
+        audio: Buffer.from('mp3 bytes'),
+        diagnostic: { classification: 'tts_succeeded' },
+      });
+      try {
+        const result = await dispatchAction(
+          {
+            action: 'ttsSpeak',
+            requestId: 'model-test',
+            params: { text: 'Hello', voice: 'bill', model_id },
+          },
+          { ...mainContext, groupIpcDir: path.join(testPaths.base, 'ipc') },
+        );
+        if (model_id === 'invalid-model') {
+          expect(result.ok).toBe(false);
+          expect(result.output).toContain('params.model_id must be');
+          expect(synthesizeSpeechDetailedMock).not.toHaveBeenCalled();
+        } else {
+          expect(result.ok).toBe(true);
+          expect(synthesizeSpeechDetailedMock).toHaveBeenCalledWith(
+            expect.objectContaining({
+              modelId: model_id,
+              voiceId: '1aqd3YTFW2bNeuxQ2jxO',
+            }),
+          );
+        }
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
   it.each([0.5, 1.21, 0, -1, '0.8', null, NaN, Infinity])(
     'rejects invalid speed %s before synthesis',
     async (speed) => {
@@ -121,7 +157,7 @@ describe('TTS host action', () => {
           apiKey: 'test-eleven-key',
           text: 'Hello',
           voiceId: 'XjdmlV0OFXfXE6Mg2Sb7',
-          modelId: 'eleven_v4',
+          modelId: 'eleven_turbo_v2_5',
           speed: speed ?? 1.0,
           timeoutMs: 30000,
           context: {
