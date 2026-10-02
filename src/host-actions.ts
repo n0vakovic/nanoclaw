@@ -860,6 +860,7 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
       'funny-nigerian': 'ji8V21dyEPg5du75d9nX',
       indian: 'T8lgQl6x5PSdhmmWx42m',
       vlad: 'XjdmlV0OFXfXE6Mg2Sb7',
+      bill: '1aqd3YTFW2bNeuxQ2jxO',
     };
 
     const envVars = readEnvFile(['ELEVENLABS_API_KEY', 'ELEVENLABS_VOICE_ID']);

@@ -145,7 +145,7 @@ server.tool(
         'Narration speed from 0.7 (slowest) to 1.2 (fastest). Defaults to 1.0 (normal). Values below 1 slow speech; values above 1 speed it up.',
       ),
     voice: z
-      .enum(['lucy', 'funny-nigerian', 'indian', 'vlad'])
+      .enum(['lucy', 'funny-nigerian', 'indian', 'vlad', 'bill'])
       .optional()
       .describe(
         'Optional named voice. Omit for default. Options: ' +
@@ -153,6 +153,7 @@ server.tool(
           '"funny-nigerian" (Nigerian accent, slow and comedic — good for jokes or character bits); ' +
           '"indian" (Indian accent, energetic — good for animated delivery); ' +
           '"vlad" (Russian accent — good for deadpan or dramatic lines). ' +
+          '"bill" (Bill). ' +
           'Pick to match tone; default voice is fine for normal replies.',
       ),
   },
