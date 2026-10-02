@@ -121,6 +121,7 @@ describe('TTS host action', () => {
           apiKey: 'test-eleven-key',
           text: 'Hello',
           voiceId: 'XjdmlV0OFXfXE6Mg2Sb7',
+          modelId: 'eleven_v4',
           speed: speed ?? 1.0,
           timeoutMs: 30000,
           context: {

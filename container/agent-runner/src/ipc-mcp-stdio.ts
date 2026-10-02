@@ -134,7 +134,7 @@ server.tool(
     text: z
       .string()
       .describe(
-        'The text to speak. Write for natural speech — no markdown, no bullets, no headers.',
+        'The text to speak using Eleven v4. Write for natural speech — no markdown, no bullets, no headers. Use occasional audio tags such as [excited], [laughs], [sighs], or [whispers] when appropriate; put them directly in the text as delivery cues.',
       ),
     speed: z
       .number()

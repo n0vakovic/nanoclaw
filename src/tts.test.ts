@@ -49,7 +49,7 @@ const baseOptions = {
   apiKey: 'secret-test-key',
   text: 'A short line.',
   voiceId: 'voice-1',
-  modelId: 'eleven_turbo_v2_5',
+  modelId: 'eleven_v4',
   timeoutMs: 30_000,
 };
 

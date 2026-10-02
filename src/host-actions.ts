@@ -847,7 +847,7 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
    *   accepted here too so existing callers passing "vlad" as voice_id work)
    * params.voice: named voice from VOICES map (e.g. 'lucy', 'vlad')
    * params.speed: optional narration speed (0.7–1.2, defaults to 1.0)
-   * params.model_id: optional model (defaults to eleven_turbo_v2_5)
+   * Uses Eleven v4 for all voices, including expressive audio tags.
    * Resolution: voice_id (as ID or name) > VOICES[voice] > ELEVENLABS_VOICE_ID env
    *
    * Output path: written to <groupIpcDir>/media/ when ctx is available, and
@@ -871,13 +871,11 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
       text,
       voice_id,
       voice,
-      model_id,
       speed = 1.0,
     } = params as {
       text: string;
       voice_id?: string;
       voice?: string;
-      model_id?: string;
       speed?: number;
     };
     if (!text) throw new Error('ttsSpeak: missing params.text');
@@ -917,7 +915,7 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
       apiKey,
       text,
       voiceId,
-      modelId: model_id ?? 'eleven_turbo_v2_5',
+      modelId: 'eleven_v4',
       speed,
       timeoutMs: TTS_FETCH_TIMEOUT_MS,
       context: {
