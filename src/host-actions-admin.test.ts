@@ -68,7 +68,7 @@ beforeEach(() => {
 });
 
 describe('TTS host action', () => {
-  it.each(['eleven_turbo_v2_5', 'eleven_v4', 'invalid-model'])(
+  it.each(['eleven_turbo_v2_5', 'eleven_v3', 'eleven_v4', 'invalid-model'])(
     'handles explicit model %s',
     async (model_id) => {
       vi.stubEnv('ELEVENLABS_API_KEY', 'test-eleven-key');

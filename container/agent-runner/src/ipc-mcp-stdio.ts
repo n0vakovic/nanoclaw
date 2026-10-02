@@ -134,13 +134,13 @@ server.tool(
     text: z
       .string()
       .describe(
-        'The text to speak. Write for natural speech — no markdown, no bullets, no headers. The default Turbo v2.5 model does NOT support emotion/audio tags: omit tags from default-model text. Only when model_id is eleven_v4, you may include delivery cues such as [excited], [laughs], [sighs], or [whispers].',
+        'The text to speak. Write for natural speech — no markdown, no bullets, no headers. The default Turbo v2.5 model does NOT support emotion/audio tags: omit tags from default-model text. Only when model_id is eleven_v3 or eleven_v4, you may include delivery cues such as [excited], [laughs], [sighs], or [whispers].',
       ),
     model_id: z
-      .enum(['eleven_turbo_v2_5', 'eleven_v4'])
+      .enum(['eleven_turbo_v2_5', 'eleven_v3', 'eleven_v4'])
       .optional()
       .describe(
-        'Omit for Eleven Turbo v2.5, the preferred default voice sound; it does not support emotion/audio tags. Select eleven_v4 only when requested for expressive audio tags; voices can sound different.',
+        'Omit for Eleven Turbo v2.5, the preferred default voice sound; it does not support emotion/audio tags. Select eleven_v3 or eleven_v4 only when requested for expressive audio tags; voices can sound different.',
       ),
     speed: z
       .number()
