@@ -1,14 +1,53 @@
 # Readwise / Snipd event integration
 
-Status: proposed design, 2026-10-04. No receiver, subscription, deployment, or bot behavior has been changed.
+Status: exploratory design, updated 2026-10-04. The interaction below is a promising sketch, not an implementation decision. No receiver, subscription, deployment, or bot behavior has been changed.
 
 ## Intended behavior
 
 When a Snipd highlight reaches Readwise, NanoClaw records it and can notify the main chat or process an episode in an independent agent session. The receiver is a shared host capability; the destination and processing policy are configuration. These are complementary choices, not competing architectures.
 
-Suggested first release: ingest all Snipd episodes, accumulate their highlights, and send a compact episode notification to the registered main group. Optional synthesis can follow once the basic delivery works. Do not invoke an agent for every snip.
+An earlier architectural option was to accumulate highlights and send a compact episode notification to main. The later UX exploration focuses on an individual snip card when a snip arrives. Immediate cards versus episode batching remains open; neither delivery cadence nor automatic synthesis is decided. Ingestion itself should not require an agent invocation for every snip.
 
 Example: “10 new snips from The Art of Accomplishment — A New Definition of People Pleasing” with the Readwise episode link. Preserve summaries, transcript excerpts, timestamps, and individual Snipd URLs for later retrieval.
+
+## Telegram interaction exploration
+
+The aim is immediate recognition of what was snipped, not memorization weeks later. Show the source, episode position, a memorable source quote, and a short plain-language summary. Avoid a separate “Remember” slogan or a coaching-style invitation. The preferred discussion hint is simply “Reply to discuss.”
+
+Example message explored with Milan:
+
+> 🎧 **The Art of Accomplishment**
+>
+> *A New Definition of People Pleasing · 31:29*
+>
+> “It’s amazing how much we can accept rejection when we’re not rejecting ourselves.”
+>
+> Someone being upset with you doesn’t automatically mean you’ve done something wrong.
+>
+> [▶ Listen](https://share.snipd.com/snip/4577664b-76ba-4e05-b498-dd0944707f41) · **✍️ Add note**
+>
+> *Reply to discuss.*
+
+“Listen” would use the original Snipd share URL; opening the native app depends on device link handling and has not been verified. “Add note” is a proposed Telegram button, not a working action in this document. The quote is source wording; the short summary is a paraphrase. Preserve that distinction when generating cards.
+
+Two paths from the same card:
+
+- **Add note:** capture a voice or text thought for that exact Readwise highlight.
+- **Reply to discuss:** resolve the referenced snip, answer questions such as “tell me more,” and support back-and-forth that may eventually produce a small note. Discussion does not itself imply saving every message.
+
+For example, Milan's response was that he could explore why someone is upset without agreeing with their judgment: “I'm not sure I agree with you, but let me understand what that's about.” This is his contribution, distinct from the podcast quote. A possible distilled note is “I can understand your upset without agreeing with your judgment.” The precise draft/save interaction is still open; “save that as my note” or a save action on a displayed draft are possibilities. Neither this thought nor any note was written to Readwise during the exploration.
+
+Readwise supports a highlight `note` via `PATCH /api/v2/highlights/<id>/`: https://readwise.io/api_deets#highlight-update. A future implementation should read the existing note, preserve it when adding a reflection, and verify the write. This is an update to one note field, not a native threaded discussion. Do not assume a Readwise note syncs back into Snipd; that has not been verified.
+
+Implementation implications to investigate:
+
+- Persist Telegram chat/message IDs mapped to the Readwise highlight ID, book ID, and Snipd URL. Follow the same association through discussion replies so later “save that” targets the right highlight, including after restart.
+- Authenticate note actions against the allowed chat/user; callback payloads must not authorize arbitrary highlight writes.
+- Bind note drafts to a highlight and preserve the user's wording, correcting transcription only where the meaning is clear. Ask only when the target or wording is genuinely ambiguous.
+- Keep discussion as ordinary user-initiated conversation with the referenced source available; automated arrival must not inject a synthetic user turn.
+- Extend the current outbound adapter if needed to return Telegram message IDs and support buttons. Do not assume the existing generic send interface already supports these interactions.
+
+This section records exploratory shaping only. It does not authorize implementation, deployment, automated note saving, or a chosen notification cadence.
 
 ## Evidence and existing integration points
 
@@ -26,7 +65,7 @@ Example: “10 new snips from The Art of Accomplishment — A New Definition of 
 2. Validate a bounded JSON body, compare the body `secret` to the configured webhook secret in constant time, and validate the event type and numeric IDs. This is the documented shared-secret mechanism, not an invented HMAC header protocol. Remove the secret before persistence or logging.
 3. Transactionally insert a durable event with a unique `(provider, event_type, highlight_id)` key. Reply with success after commit, including on duplicates. Return an error if storage fails. Never wait for Readwise, Telegram, or a container before acknowledging.
 4. A bounded background worker fetches the book metadata and current highlights through the Readwise API. Cache book metadata and retain only source `snipd`. Ignore deleted highlights. Retry network and rate-limit failures with backoff and `Retry-After` support.
-5. Upsert normalized highlights and add unseen ones to a persisted episode batch. Suggested default: flush after ten minutes without a new highlight, with a maximum thirty-minute delay from the first pending highlight. This is a heuristic, not detection that listening has ended. Later snips create another batch.
+5. Upsert normalized highlights. For the batching option, add unseen ones to a persisted episode batch. An initial candidate timing was: flush after ten minutes without a new highlight, with a maximum thirty-minute delay from the first pending highlight. This is a heuristic, not detection that listening has ended. Later snips create another batch.
 6. Resolve the configured group from registered groups (`isMain` by default), create a durable delivery record, then send through the existing strict outbound routing. A notification is not a synthetic user message and must not advance the foreground conversation cursor or inject text into an active agent.
 7. If synthesis is enabled, start a detached `JobManager` request keyed by the persisted batch ID. Run in the configured processing group; keep delivery in that group for v1, since the current job API couples execution group and destination. A separate processing/delivery split would need an explicit extension.
 
@@ -78,4 +117,4 @@ Tests should cover rejected secrets and oversized bodies, duplicate delivery, cr
 
 Deploy with delivery paused; register and test the endpoint using Readwise's webhook setup flow, then make one real Snipd snip and verify event → enrichment → batch. The exact test-endpoint payload needs capture during setup before finalizing its handler. Enable main-chat notifications only after that path passes. Synthesis is a separate later toggle.
 
-Implementation choices still to settle: public HTTPS ingress on this installation, desired batching cadence, and whether v1 merely notifies or also synthesizes. The recommended starting point is shared host ingestion with batched main-chat notifications.
+Implementation choices still to settle: public HTTPS ingress on this installation, desired batching cadence, and whether v1 merely notifies or also synthesizes. Shared host ingestion remains a proposed architecture; individual recognition cards versus batched notifications, discussion handling, and note-save behavior need further shaping before implementation.
