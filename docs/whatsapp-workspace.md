@@ -144,7 +144,9 @@ all three summary modes. Gmail records use namespaced IDs and the same durable
 review/delivery tracking as WhatsApp. The agent distinguishes teacher email
 from parent discussion, consolidates overlap, and preserves optional suggestions.
 Email body text is included; unread attachment contents must not be inferred.
-Unreadable email or a capped search fails instead of falsely saying no updates.
+Bodyless/attachment-only email is retained with an explicit coverage warning,
+without blocking other messages. Attachment contents are never inferred. A capped
+search or failed Gmail request still fails rather than falsely saying no updates.
 
 ## Typed @Ras family conversation
 
@@ -169,3 +171,7 @@ The polling cursor and uncertain reply intent are kept in the local
 `data/whatsapp-conversation-state.json`. An uncertain send blocks further
 replies until reconciled, to avoid duplicate messages. Delivery depends on the
 existing wacli sync service and NanoClaw being running.
+
+School scheduled runs verify a persisted sent/skipped outcome. An agent turn
+that merely describes a tool error is recorded as a failed task; daily delivery
+failures also notify the main conversation despite normal silent delivery.

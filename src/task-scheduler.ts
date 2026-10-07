@@ -1,3 +1,4 @@
+import { schoolSummaryCompletedSince } from './whatsapp-school.js';
 import { ChildProcess } from 'child_process';
 import { CronExpressionParser } from 'cron-parser';
 import fs from 'fs';
@@ -230,6 +231,32 @@ async function runTask(
     logger.error({ taskId: task.id, error }, 'Task failed');
   }
 
+  if (
+    task.id === 'school-summary-daily' ||
+    task.id === 'school-summary-urgent'
+  ) {
+    const mode = task.id === 'school-summary-daily' ? 'daily' : 'urgent';
+    if (!schoolSummaryCompletedSince(mode, startTime)) {
+      error ||=
+        'School summary did not record a sent/skipped outcome. ' +
+        (result || 'No execution result.');
+      // Daily failures must be visible even though normal delivery uses a silent task.
+      if (mode === 'daily') {
+        try {
+          await deps.sendMessage(
+            task.chat_jid,
+            '⚠️ School summary failed and was not delivered to the family group. ' +
+              error.slice(0, 600),
+          );
+        } catch (notifyError) {
+          logger.error(
+            { notifyError, taskId: task.id },
+            'Could not notify owner about school summary failure',
+          );
+        }
+      }
+    }
+  }
   const durationMs = Date.now() - startTime;
 
   logTaskRun({

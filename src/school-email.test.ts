@@ -71,7 +71,32 @@ describe('school email source', () => {
       await readSchoolEmails(config, 'main', '2026-09-16T00:00:00Z'),
     ).toEqual(await readSchoolEmails(config, 'main', '2026-09-16T00:00:00Z'));
   });
-  it('fails rather than reporting no updates when the body is unavailable or search is capped', async () => {
+  it('includes attachment-only email metadata without blocking other school emails', async () => {
+    vi.mocked(googleGmailSearch).mockResolvedValue(
+      JSON.stringify([
+        { id: 'pdf', from: 'a@edu.pt' },
+        { id: 'text', from: 'a@edu.pt' },
+      ]),
+    );
+    vi.mocked(googleGmailMessageRead).mockImplementation(
+      async ({ messageId }) =>
+        JSON.stringify({
+          headers: {
+            from: 'a@edu.pt',
+            subject: 'Reading project',
+            date: 'Thu, 17 Sep 2026 14:38:16 +0000',
+          },
+          ...(messageId === 'pdf'
+            ? { message: { attachments: [{ filename: 'reading.pdf' }] } }
+            : { body: wrap('Bring a book', 'b') }),
+        }),
+    );
+    const rows = await readSchoolEmails(config, 'main', '2026-09-16T00:00:00Z');
+    expect(rows).toHaveLength(2);
+    expect(rows[0].coverageWarning).toContain('reading.pdf');
+    expect(rows[1].text).toContain('Bring a book');
+  });
+  it('keeps bodyless email as explicit incomplete evidence and still rejects capped searches', async () => {
     vi.mocked(googleGmailSearch).mockResolvedValue(
       JSON.stringify([{ id: 'a', from: 'a@edu.pt' }]),
     );
@@ -80,9 +105,10 @@ describe('school email source', () => {
         headers: { from: 'a@edu.pt', date: 'Thu, 17 Sep 2026 14:38:16 +0000' },
       }),
     );
-    await expect(
-      readSchoolEmails(config, 'main', '2026-09-16T00:00:00Z'),
-    ).rejects.toThrow('body unavailable');
+    const rows = await readSchoolEmails(config, 'main', '2026-09-16T00:00:00Z');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].text).toContain('No readable email body');
+    expect(rows[0].coverageWarning).toContain('proverite originalni mejl');
     vi.mocked(googleGmailSearch).mockResolvedValue(
       JSON.stringify(Array(100).fill({ id: 'a' })),
     );

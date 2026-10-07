@@ -72,11 +72,23 @@ export async function readSchoolEmails(
           throw new Error('School email has no valid timestamp');
         if (timestamp < Date.parse(after)) return null;
         const subject = content(headers?.subject);
-        const body = content(full.body ?? full.message?.body);
-        if (!body)
-          throw new Error(
-            'School email body unavailable; do not treat it as no updates',
-          );
+        const body = content(full.body ?? full.message?.body).trim();
+        const attachments = (
+          Array.isArray(full.message?.attachments)
+            ? full.message.attachments
+            : []
+        )
+          .map((attachment: { filename?: unknown }) =>
+            content(attachment.filename),
+          )
+          .filter(Boolean);
+        const coverageWarning = body
+          ? undefined
+          : `Email bez čitljivog teksta: ${subject}${attachments.length ? ` — prilozi: ${attachments.join(', ')}` : ''}. Sadržaj nije protumačen; proverite originalni mejl.`;
+        const readableBody =
+          body ||
+          `[No readable email body. ${attachments.length ? `Attachments: ${attachments.join(', ')}.` : 'No readable attachment metadata.'} Do not infer its contents or treat it as no news.]`;
+
         return {
           sourceType: 'email' as const,
           gmailAlias: config.alias,
@@ -88,7 +100,8 @@ export async function readSchoolEmails(
           senderId: senderAddress(headers.from),
           senderName: headers.from,
           subject,
-          text: `Email subject: ${subject}\n\n${body}`,
+          coverageWarning,
+          text: `Email subject: ${subject}\n\n${readableBody}`,
           media: undefined,
           edited: false,
           revoked: false,

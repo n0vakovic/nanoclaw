@@ -8,6 +8,10 @@ import {
   startSchedulerLoop,
 } from './task-scheduler.js';
 
+vi.mock('./whatsapp-school.js', () => ({
+  schoolSummaryCompletedSince: vi.fn(() => false),
+}));
+
 vi.mock('./container-runner.js', () => ({
   runContainerAgent: vi.fn(),
   writeGroupSessionsIndex: vi.fn(),
@@ -24,6 +28,62 @@ describe('task scheduler', () => {
   afterEach(() => {
     vi.clearAllTimers();
     vi.useRealTimers();
+  });
+
+  it('reports a failed school delivery even when the agent turn succeeds and delivery is silent', async () => {
+    createTask({
+      id: 'school-summary-daily',
+      group_folder: 'main',
+      chat_jid: 'chat',
+      prompt: 'run',
+      schedule_type: 'once',
+      schedule_value: new Date().toISOString(),
+      context_mode: 'isolated',
+      delivery_mode: 'silent',
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      status: 'active',
+      created_at: new Date().toISOString(),
+    });
+    vi.mocked(runContainerAgent).mockImplementation(
+      async (_group, _input, _onProcess, onOutput) => {
+        await onOutput?.({
+          status: 'success',
+          result: 'Tool failed; no summary sent',
+        });
+        return { status: 'success', result: 'Tool failed; no summary sent' };
+      },
+    );
+    const sendMessage = vi.fn(async () => {});
+    const queue = {
+      enqueueTask: vi.fn((_key, _id, fn) => {
+        void fn();
+      }),
+      notifyIdle: vi.fn(),
+      closeStdin: vi.fn(),
+    };
+    startSchedulerLoop({
+      registeredGroups: () => ({
+        chat: {
+          name: 'Main',
+          folder: 'main',
+          trigger: '@Ras',
+          added_at: '2026-01-01',
+          isMain: true,
+        },
+      }),
+      getSessions: () => ({}),
+      queue: queue as any,
+      onProcess: () => {},
+      sendMessage,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(getTaskById('school-summary-daily')?.last_result).toContain(
+      'Error:',
+    );
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith(
+      'chat',
+      expect.stringContaining('School summary failed'),
+    );
   });
 
   it('pauses due tasks with invalid group folders to prevent retry churn', async () => {

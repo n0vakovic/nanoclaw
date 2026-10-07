@@ -22,6 +22,7 @@ interface SchoolConfig {
   timezone: string;
 }
 interface Snapshot {
+  coverageWarnings?: string[];
   id: string;
   mode: Mode;
   createdAt: string;
@@ -217,6 +218,9 @@ export function prepareSchoolSummary(
     });
     const now = new Date().toISOString();
     const snapshot: Snapshot = {
+      coverageWarnings: emails.flatMap((email) =>
+        email.coverageWarning ? [email.coverageWarning] : [],
+      ),
       id: randomUUID(),
       mode,
       createdAt: now,
@@ -250,6 +254,7 @@ export function prepareSchoolSummary(
       timezone: settings.timezone,
       source: settings.source,
       emailSource: settings.gmail,
+      coverageWarnings: snapshot.coverageWarnings,
       sourceCounts: { whatsapp: whatsapp.length, email: emails.length },
       destination: settings.destination,
       fetchedAt: now,
@@ -329,7 +334,7 @@ export function completeSchoolSummary(
       });
       const label =
         snapshot.mode === 'urgent' ? 'Važno iz škole' : 'Školski pregled';
-      const body = `🤖 ${label}\n\n${text.trim()}\n\n${schoolSummaryCoverage(snapshot.messages, settings.timezone)}`;
+      const body = `🤖 ${label}\n\n${text.trim()}\n\n${schoolSummaryCoverage(snapshot.messages, settings.timezone)}${snapshot.coverageWarnings?.length ? '\n\n⚠️ ' + snapshot.coverageWarnings.join('\n') : ''}`;
       // Persist intent before the external write; a crash or timeout must never trigger blind retries.
       state.inFlight = {
         snapshotId: id,
@@ -365,6 +370,8 @@ export function completeSchoolSummary(
       ];
     }
     const result = {
+      completedAt: new Date().toISOString(),
+      mode: snapshot.mode,
       status: text.trim() ? 'sent' : 'skipped',
       destination: settings.destination.name,
       receipt,
@@ -387,4 +394,18 @@ export function _setSchoolDependenciesForTests(overrides?: {
   read = overrides?.read ?? readWhatsAppAutomationMessages;
   send = overrides?.send ?? defaultSend;
   serial = Promise.resolve();
+}
+
+// The scheduler must verify a recorded outcome, not merely a successful agent turn.
+export function schoolSummaryCompletedSince(
+  mode: string,
+  startedAt: number,
+): boolean {
+  const state = load();
+  return Object.values(state.completed).some((value) => {
+    const result = value as { mode?: string; completedAt?: string };
+    return (
+      result.mode === mode && Date.parse(result.completedAt || '') >= startedAt
+    );
+  });
 }
