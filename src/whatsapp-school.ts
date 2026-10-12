@@ -35,13 +35,29 @@ interface State {
   delivered: string[];
   snapshots: Record<string, Snapshot>;
   completed: Record<string, unknown>;
+  failedSends?: Array<{ at: string; snapshotId: string; reason: string }>;
   summaries: Array<{ at: string; mode: Mode; text: string }>;
   inFlight?: {
+    messageIds?: string[];
+    error?: string;
     snapshotId: string;
     startedAt: string;
     text: string;
     destination: SchoolConfig['destination'];
   };
+}
+// whatsmeow/send.go returns this before constructing/submitting the message.
+// Do not classify generic 429s or transport timeouts as safe to retry.
+const GROUP_RATE_LIMIT =
+  'failed to get group members: info query returned status 429: rate-overlimit';
+export class SchoolSendRejectedError extends Error {}
+export function schoolSendRejectedBeforeSubmission(output: string): boolean {
+  try {
+    const result = JSON.parse(output);
+    return result?.success === false && result?.error === GROUP_RATE_LIMIT;
+  } catch {
+    return false;
+  }
 }
 const exec = promisify(execFile);
 const defaultSend = async (
@@ -49,25 +65,42 @@ const defaultSend = async (
   chatId: string,
   text: string,
 ): Promise<unknown> => {
-  const { stdout } = await exec(
-    WHATSAPP_WACLI_PATH,
-    [
-      '--store',
-      storeDir,
-      '--json',
-      '--timeout',
-      '30s',
-      'send',
-      'text',
-      '--to',
-      chatId,
-      '--message',
-      text,
-      '--no-preview',
-    ],
-    { timeout: 35_000, maxBuffer: 2_000_000, encoding: 'utf8' },
-  );
+  let stdout: string;
+  try {
+    ({ stdout } = await exec(
+      WHATSAPP_WACLI_PATH,
+      [
+        '--store',
+        storeDir,
+        '--json',
+        '--timeout',
+        '30s',
+        'send',
+        'text',
+        '--to',
+        chatId,
+        '--message',
+        text,
+        '--no-preview',
+      ],
+      { timeout: 35_000, maxBuffer: 2_000_000, encoding: 'utf8' },
+    ));
+  } catch (error) {
+    // Only parse the CLI envelope: command errors embed the user-supplied body.
+    const failure = error as { stdout?: string; stderr?: string };
+    if (
+      [failure.stdout, failure.stderr].some(
+        (output) =>
+          typeof output === 'string' &&
+          schoolSendRejectedBeforeSubmission(output),
+      )
+    )
+      throw new SchoolSendRejectedError(GROUP_RATE_LIMIT);
+    throw error;
+  }
   const result = JSON.parse(stdout);
+  if (result.success === false && result.error === GROUP_RATE_LIMIT)
+    throw new SchoolSendRejectedError(result.error);
   if (result.success !== true)
     throw new Error('wacli did not confirm school summary send');
   return result.data;
@@ -338,16 +371,38 @@ export function completeSchoolSummary(
       // Persist intent before the external write; a crash or timeout must never trigger blind retries.
       state.inFlight = {
         snapshotId: id,
+        messageIds: ids,
         startedAt: new Date().toISOString(),
         text: body,
         destination: settings.destination,
       };
       save(state);
-      receipt = await send(
-        destination.storeDir,
-        settings.destination.chatId,
-        body,
-      );
+      try {
+        receipt = await send(
+          destination.storeDir,
+          settings.destination.chatId,
+          body,
+        );
+      } catch (error) {
+        if (error instanceof SchoolSendRejectedError) {
+          state.failedSends = [
+            ...(state.failedSends ?? []),
+            {
+              at: new Date().toISOString(),
+              snapshotId: id,
+              reason: error.message,
+            },
+          ].slice(-30);
+          delete state.inFlight;
+          // No messages are marked reviewed or delivered. A later scheduled run
+          // can prepare them again; this call never immediately retries.
+        } else {
+          state.inFlight.error =
+            'Send failed without a definitive rejection; reconcile before retrying';
+        }
+        save(state);
+        throw error;
+      }
       state.summaries.push({
         at: new Date().toISOString(),
         mode: snapshot.mode,

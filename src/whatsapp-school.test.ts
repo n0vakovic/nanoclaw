@@ -15,6 +15,8 @@ import {
   completeSchoolSummary,
   prepareSchoolSummary,
   schoolSummaryCoverage,
+  SchoolSendRejectedError,
+  schoolSendRejectedBeforeSubmission,
 } from './whatsapp-school.js';
 const messages = [
   {
@@ -190,6 +192,48 @@ describe('school summaries', () => {
       completeSchoolSummary({ snapshotId: daily.snapshotId }),
     ).rejects.toThrow('expired');
     expect(fresh.messages).toHaveLength(1);
+  });
+
+  it('recognizes only the structured group lookup rejection, never text embedded in a command', () => {
+    const reason =
+      'failed to get group members: info query returned status 429: rate-overlimit';
+    expect(
+      schoolSendRejectedBeforeSubmission(
+        JSON.stringify({ success: false, error: reason }),
+      ),
+    ).toBe(true);
+    for (const output of [
+      'Command failed --message ' + reason,
+      JSON.stringify({ success: false, error: 'send timed out' }),
+      JSON.stringify({ success: false, error: 'status 429: rate-overlimit' }),
+      JSON.stringify({ success: true, error: reason }),
+      '',
+      'null',
+    ])
+      expect(schoolSendRejectedBeforeSubmission(output)).toBe(false);
+  });
+
+  it('releases a definite pre-send rejection without covering messages or immediately retrying', async () => {
+    const snapshot = await prepare();
+    send.mockRejectedValueOnce(
+      new SchoolSendRejectedError('group metadata rate limited'),
+    );
+    await expect(
+      completeSchoolSummary({
+        snapshotId: snapshot.snapshotId,
+        text: 'Novosti',
+        messageIds: ['m1'],
+      }),
+    ).rejects.toThrow('rate limited');
+    expect(send).toHaveBeenCalledTimes(1);
+    const fresh = await prepare();
+    expect(fresh.messages).toHaveLength(2);
+    await completeSchoolSummary({
+      snapshotId: fresh.snapshotId,
+      text: 'Novosti',
+      messageIds: ['m1'],
+    });
+    expect(send).toHaveBeenCalledTimes(2);
   });
 
   it('does not retry after uncertain delivery, including after a process restart', async () => {
