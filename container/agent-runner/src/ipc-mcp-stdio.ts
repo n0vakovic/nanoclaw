@@ -908,7 +908,7 @@ server.tool(
   'register_group',
   `Register a new chat/group so the agent can respond to messages there. Main group only.
 
-Use available_groups.json to find the JID for a group. The folder name must be channel-prefixed: "{channel}_{group-name}" (e.g., "whatsapp_family-chat", "telegram_dev-team", "discord_general"). Use lowercase with hyphens for the group name part.`,
+Use available_groups.json or Telegram /chatid to find the JID for an existing group. The folder name must be channel-prefixed: "{channel}_{group-name}" (e.g., "whatsapp_family-chat", "telegram_dev-team", "discord_general"). Use lowercase with hyphens for the group name part. Set requires_trigger to false for personal groups that should respond without a mention. Registration is queued: verify with inspect_group_config before initializing CLAUDE.md using write_group_memory.`,
   {
     jid: z
       .string()
@@ -922,6 +922,12 @@ Use available_groups.json to find the JID for a group. The folder name must be c
         'Channel-prefixed folder name (e.g., "whatsapp_family-chat", "telegram_dev-team")',
       ),
     trigger: z.string().describe('Trigger word (e.g., "@Andy")'),
+    requires_trigger: z
+      .boolean()
+      .optional()
+      .describe(
+        'Whether messages require the trigger word (defaults to true). Set false for personal groups like EMA.',
+      ),
   },
   async (args) => {
     if (!isMain) {
@@ -942,6 +948,7 @@ Use available_groups.json to find the JID for a group. The folder name must be c
       name: args.name,
       folder: args.folder,
       trigger: args.trigger,
+      requiresTrigger: args.requires_trigger,
       timestamp: new Date().toISOString(),
     };
 
@@ -951,7 +958,7 @@ Use available_groups.json to find the JID for a group. The folder name must be c
       content: [
         {
           type: 'text' as const,
-          text: `Group "${args.name}" registered. It will start receiving messages immediately.`,
+          text: `Registration queued for group "${args.name}". Verify with inspect_group_config before initializing group memory or reporting success.`,
         },
       ],
     };

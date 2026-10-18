@@ -163,10 +163,10 @@ Fields:
 ### Adding a Group
 
 1. Query the database to find the group's JID
-2. Use the `register_group` MCP tool with the JID, name, folder, and trigger
-3. Optionally include `containerConfig` for additional mounts
+2. Use the `register_group` MCP tool with the JID, name, folder, and trigger; set `requires_trigger: false` for personal groups that should respond without a mention
+3. Registration is queued; verify it with `inspect_group_config` before reporting success
 4. The group folder is created automatically: `/workspace/project/groups/{folder-name}/`
-5. Optionally create an initial `CLAUDE.md` for the group
+5. Initialize `CLAUDE.md` using `write_group_memory` after registration is verified
 
 Folder naming convention — channel prefix with underscore separator:
 - WhatsApp "Family Chat" → `whatsapp_family-chat`
