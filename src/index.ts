@@ -50,6 +50,10 @@ import {
   storeMessage,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
+import {
+  deliveredOutputContext,
+  sendDeliveredOutput,
+} from './delivered-output.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import {
   handleGoogleApprovalCommand,
@@ -136,8 +140,7 @@ function recoverySnapshot(jid?: string): RecoverySnapshot {
 async function sendStrict(jid: string, text: string): Promise<void> {
   const channel = findChannel(channels, jid);
   if (!channel) throw new Error('Channel unavailable');
-  await (channel.sendMessageStrict?.(jid, text) ??
-    channel.sendMessage(jid, text));
+  await sendDeliveredOutput(channel, jid, text, 'Host / background job');
 }
 
 function setupBackgroundJobs(): void {
@@ -345,7 +348,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
-  const prompt = formatMessages(missedMessages, TIMEZONE);
+  const prompt =
+    deliveredOutputContext(chatJid) + formatMessages(missedMessages, TIMEZONE);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -408,7 +412,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
       if (text) {
-        await channel.sendMessage(chatJid, text);
+        await sendDeliveredOutput(channel, chatJid, text, 'Live assistant');
         outputSentToUser = true;
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
@@ -672,7 +676,8 @@ async function messageGroupAgent(opts: {
         return;
       }
       const text = formatOutbound(rawText);
-      if (text) await channel.sendMessage(jid, text);
+      if (text)
+        await sendDeliveredOutput(channel, jid, text, 'Intergroup task');
     };
 
     try {
@@ -851,7 +856,9 @@ async function startMessageLoop(): Promise<void> {
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
-          const formatted = formatMessages(messagesToSend, TIMEZONE);
+          const formatted =
+            deliveredOutputContext(chatJid) +
+            formatMessages(messagesToSend, TIMEZONE);
 
           if (queue.sendMessage(chatJid, formatted)) {
             logger.debug(
@@ -1270,18 +1277,22 @@ async function main(): Promise<void> {
     sendMessage: async (jid, rawText) => {
       const channel = findChannel(channels, jid);
       if (!channel) {
-        logger.warn({ jid }, 'No channel owns JID, cannot send message');
-        return;
+        throw new Error(`No channel for JID: ${jid}`);
       }
       const text = formatOutbound(rawText);
-      if (text) await channel.sendMessage(jid, text);
+      if (text) await sendDeliveredOutput(channel, jid, text, 'Scheduled task');
     },
   });
   startIpcWatcher({
     sendMessage: (jid, text) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
-      return channel.sendMessage(jid, text);
+      return sendDeliveredOutput(
+        channel,
+        jid,
+        text,
+        'Agent tool / background output',
+      );
     },
     sendApprovalMessage: (jid, text, approvalId) => {
       const channel = findChannel(channels, jid);

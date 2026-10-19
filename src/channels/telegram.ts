@@ -509,6 +509,7 @@ export class TelegramChannel implements Channel {
         }[Voice: ${outcome.transcript}]`,
         timestamp: new Date().toISOString(),
         is_from_me: false,
+        is_voice: true,
       });
       this.markRetainedVoiceTranscribed(
         retained,
@@ -1312,6 +1313,7 @@ export class TelegramChannel implements Channel {
         content,
         timestamp,
         is_from_me: false,
+        is_voice: true,
       });
     });
     for (const kind of ['document', 'audio', 'video'] as const) {
@@ -1517,8 +1519,7 @@ export class TelegramChannel implements Channel {
 
   async sendVoice(jid: string, audioPath: string): Promise<void> {
     if (!this.bot) {
-      logger.warn('Telegram bot not initialized');
-      return;
+      throw new Error('Telegram bot not initialized');
     }
     try {
       const numericId = jid.replace(/^tg:/, '');
@@ -1526,6 +1527,7 @@ export class TelegramChannel implements Channel {
       logger.info({ jid, audioPath }, 'Telegram voice note sent');
     } catch (err) {
       logger.error({ jid, audioPath, err }, 'Failed to send Telegram voice');
+      throw err;
     }
   }
 

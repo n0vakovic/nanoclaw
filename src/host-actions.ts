@@ -1,4 +1,5 @@
 import { getArtifactService } from './artifact-server.js';
+import { readChatOutputs } from './delivered-output.js';
 /**
  * Host Action Registry for NanoClaw
  *
@@ -465,6 +466,8 @@ export function configureBackgroundJobs(handler: ActionHandler): void {
 }
 
 const ACTION_REGISTRY: Record<string, ActionHandler> = {
+  readChatOutputs: async (params, ctx) =>
+    readChatOutputs(ctx?.sourceChatJid, params),
   shareArtifact: async (params, ctx) => {
     if (
       !ctx?.sourceGroup ||

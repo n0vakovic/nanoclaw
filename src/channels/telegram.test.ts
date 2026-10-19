@@ -87,6 +87,9 @@ type Handler = (...args: any[]) => any;
 const botRef = vi.hoisted(() => ({ current: null as any }));
 
 vi.mock('grammy', () => ({
+  InputFile: class MockInputFile {
+    constructor(public path: string) {}
+  },
   Bot: class MockBot {
     token: string;
     commandHandlers = new Map<string, Handler>();
@@ -97,6 +100,7 @@ vi.mock('grammy', () => ({
     api = {
       setMyCommands: vi.fn().mockResolvedValue(true),
       sendMessage: vi.fn().mockResolvedValue(undefined),
+      sendVoice: vi.fn().mockResolvedValue(undefined),
       sendChatAction: vi.fn().mockResolvedValue(undefined),
       getFile: vi.fn().mockResolvedValue({ file_path: 'voice/file_42.ogg' }),
       answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
@@ -1093,6 +1097,7 @@ describe('TelegramChannel', () => {
         'tg:100200300',
         expect.objectContaining({
           content: '[Voice: hello from the voice note]',
+          is_voice: true,
         }),
       );
       expect(fsMock.unlinkSync).toHaveBeenCalledWith(
@@ -1250,6 +1255,25 @@ describe('TelegramChannel', () => {
   });
 
   // --- sendMessage ---
+
+  describe('sendVoice delivery confirmation', () => {
+    it('rejects a failed Telegram send so voice mode cannot count it as delivered', async () => {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      await channel.connect();
+      botRef.current.api.sendVoice.mockRejectedValueOnce(
+        new Error('Telegram unavailable'),
+      );
+      await expect(
+        channel.sendVoice('tg:123', '/tmp/voice.ogg'),
+      ).rejects.toThrow('Telegram unavailable');
+    });
+    it('rejects sends before the bot has connected', async () => {
+      const channel = new TelegramChannel('test-token', createTestOpts());
+      await expect(
+        channel.sendVoice('tg:123', '/tmp/voice.ogg'),
+      ).rejects.toThrow('not initialized');
+    });
+  });
 
   describe('sendMessage', () => {
     it('sends message via bot API', async () => {

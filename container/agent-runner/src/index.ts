@@ -20,9 +20,12 @@ import {
   query,
   HookCallback,
   PreCompactHookInput,
+  UserPromptSubmitHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
 import { ReplyCollector } from './reply-collector.js';
+import { randomUUID } from 'crypto';
+import { VoiceMode, VoiceReplyGuard, VOICE_MODE_RULE } from './voice-mode.js';
 
 interface ContainerInput {
   prompt: string;
@@ -383,7 +386,7 @@ function waitForIpcMessage(): Promise<string | null> {
  * allowing agent teams subagents to run to completion.
  * Also pipes IPC messages into the stream during the query.
  */
-async function runQuery(
+export async function runQuery(
   prompt: string,
   sessionId: string | undefined,
   mcpServerPath: string,
@@ -397,6 +400,9 @@ async function runQuery(
 }> {
   const abortController = new AbortController();
   const stream = new MessageStream();
+  const voiceScope = randomUUID();
+  const voiceMode = new VoiceMode('/workspace/ipc', containerInput.chatJid);
+  const voiceGuard = new VoiceReplyGuard(voiceMode, voiceScope);
   stream.push(prompt);
 
   // Poll IPC for follow-up messages and _close sentinel during the query
@@ -476,6 +482,7 @@ async function runQuery(
           preset: 'claude_code' as const,
           append: [
             globalClaudeMd || '',
+            'When the user asks to enter voice mode, call mcp__nanoclaw__enter_voice_mode. When the user asks to exit, call mcp__nanoclaw__exit_voice_mode. Voice mode persists across sessions. While active, voice replies are required after incoming voice messages; text may accompany them. Never automatically convert a text reply to audio.',
             containerInput.executionId
               ? 'You are a detached worker. Finish the assigned task, return its result, and do not start another background job.'
               : 'Keep the foreground conversation available. For research or multi-step tool work likely to take over 30 seconds, call mcp__nanoclaw__start_background_job with a self-contained task and context. Acknowledge the job ID and END this turn immediately. Never wait or poll for the job. Always use it when the user asks for background work. Short answers stay inline. Report technical failures plainly; do not silently retry repeatedly.',
@@ -516,6 +523,7 @@ async function runQuery(
               NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
               NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
               NANOCLAW_EXECUTION_ID: containerInput.executionId || '',
+              NANOCLAW_VOICE_SCOPE: voiceScope,
             },
           },
           ...(process.env.TODOIST_API_KEY
@@ -529,6 +537,28 @@ async function runQuery(
             : {}),
         },
         hooks: {
+          UserPromptSubmit: [
+            {
+              hooks: [
+                async (input) => {
+                  // Mark voice obligations when the SDK consumes a prompt, rather
+                  // than when the host queues it ahead of a previous turn's result.
+                  voiceGuard.acceptPrompt(
+                    (input as UserPromptSubmitHookInput).prompt,
+                  );
+                  return {
+                    hookSpecificOutput: {
+                      hookEventName: 'UserPromptSubmit' as const,
+                      ...(voiceMode.isActive()
+                        ? { additionalContext: VOICE_MODE_RULE }
+                        : {}),
+                    },
+                  };
+                },
+              ],
+            },
+          ],
+          Stop: [{ hooks: [async () => voiceGuard.stop()] }],
           PreCompact: [
             { hooks: [createPreCompactHook(containerInput.assistantName)] },
           ],
@@ -608,6 +638,7 @@ async function runQuery(
   } finally {
     ipcPolling = false;
     stream.end();
+    fs.rmSync(voiceMode.deliveryPath(voiceScope), { force: true });
   }
   log(
     `Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}`,
@@ -725,4 +756,9 @@ async function main(): Promise<void> {
   }
 }
 
-main();
+if (
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  main();
+}

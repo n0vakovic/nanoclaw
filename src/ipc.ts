@@ -104,6 +104,53 @@ export function _writeActionResultExclusive(
   }
 }
 
+/** Confirm actual channel delivery before satisfying the voice reply guard. */
+export async function _deliverVoiceWithConfirmation(
+  data: { chatJid: string; requestId?: string; voiceScope?: string },
+  groupIpcDir: string,
+  hostAudioPath: string,
+  sendVoice: (jid: string, audioPath: string) => Promise<void>,
+): Promise<void> {
+  if (data.requestId && !ACTION_REQUEST_ID_PATTERN.test(data.requestId)) {
+    throw new Error('Invalid voice delivery request ID');
+  }
+  try {
+    await sendVoice(data.chatJid, hostAudioPath);
+    if (
+      typeof data.voiceScope === 'string' &&
+      /^[a-f0-9-]{36}$/.test(data.voiceScope)
+    ) {
+      const deliveryDir = path.join(groupIpcDir, 'voice-deliveries');
+      fs.mkdirSync(deliveryDir, { recursive: true });
+      const deliveryPath = path.join(deliveryDir, `${data.voiceScope}.json`);
+      fs.writeFileSync(
+        `${deliveryPath}.tmp`,
+        JSON.stringify({ deliveredAt: Date.now() }),
+      );
+      fs.renameSync(`${deliveryPath}.tmp`, deliveryPath);
+    }
+    if (data.requestId) {
+      _writeActionResultExclusive(
+        path.join(groupIpcDir, 'action-results'),
+        data.requestId,
+        { ok: true, output: 'Voice note sent.' },
+      );
+    }
+  } catch (error) {
+    if (data.requestId) {
+      _writeActionResultExclusive(
+        path.join(groupIpcDir, 'action-results'),
+        data.requestId,
+        {
+          ok: false,
+          output: `Voice delivery failed: ${String(error)}`,
+        },
+      );
+    }
+    throw error;
+  }
+}
+
 /**
  * Translate a container-visible path to its host-side equivalent for the
  * given source group's IPC dir. Throws if the resolved host path escapes
@@ -207,7 +254,12 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     groupIpcDir,
                     'voice_note',
                   );
-                  await deps.sendVoice(data.chatJid, hostAudioPath);
+                  await _deliverVoiceWithConfirmation(
+                    data,
+                    groupIpcDir,
+                    hostAudioPath,
+                    deps.sendVoice,
+                  );
                   try {
                     fs.unlinkSync(hostAudioPath);
                   } catch {

@@ -43,6 +43,7 @@ export interface RegisteredGroup {
 }
 
 export interface NewMessage {
+  is_voice?: boolean;
   reply_to_message_id?: string;
   id: string;
   chat_jid: string;
