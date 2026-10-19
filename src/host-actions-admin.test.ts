@@ -574,3 +574,17 @@ it('restricts school conversation context to both the configured group folder an
     expect(result.output).toContain('restricted');
   }
 });
+
+describe('private X account actions', () => {
+  it.each(['xMyPosts', 'xMyBookmarks'])(
+    'rejects %s outside the main group',
+    async (action) => {
+      const result = await dispatchAction(
+        { action, requestId: 'private-x', params: {} },
+        { ...mainContext, isMain: false },
+      );
+      expect(result.ok).toBe(false);
+      expect(result.output).toContain('restricted to the main group');
+    },
+  );
+});

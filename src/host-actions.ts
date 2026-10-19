@@ -1,3 +1,4 @@
+import { readXAccount } from './x-account.js';
 import { getArtifactService } from './artifact-server.js';
 import { readChatOutputs } from './delivered-output.js';
 /**
@@ -1055,6 +1056,16 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
    * params.endpoint: X API path, e.g. "/2/tweets/search/recent"
    * params.query: key/value pairs appended as query string
    */
+  xMyPosts: async (params, ctx) => {
+    assertMain(ctx);
+    return readXAccount('tweets', params);
+  },
+
+  xMyBookmarks: async (params, ctx) => {
+    assertMain(ctx);
+    return readXAccount('bookmarks', params);
+  },
+
   xFetch: async (params) => {
     const bearerToken =
       process.env.X_BEARER_TOKEN ||
