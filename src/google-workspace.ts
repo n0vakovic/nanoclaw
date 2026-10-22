@@ -429,13 +429,14 @@ function commonGogArgs(
   accountEmail: string,
   exactCommand: string,
   readonly: boolean,
+  resultsOnly = true,
 ): string[] {
   return [
     '--account',
     accountEmail,
     '--no-input',
     '--json',
-    '--results-only',
+    ...(resultsOnly ? ['--results-only'] : []),
     '--gmail-no-send',
     '--enable-commands-exact',
     exactCommand,
@@ -584,14 +585,43 @@ export async function googleDocsRead(
   if (resource.read !== true) {
     throw new Error(`Docs "${alias}" is not readable`);
   }
-  return runGog(policy, [
+  const output = await runGog(policy, [
     'docs',
     'cat',
     docId,
     '--max-bytes',
     String(MAX_DOC_CONTENT_BYTES),
-    ...commonGogArgs(account.email, 'docs.cat', true),
+    // Preserve text alongside chips/links: --results-only prefers arrays
+    // and silently discards the body when a document contains smart chips.
+    ...commonGogArgs(account.email, 'docs.cat', true, false),
   ]);
+  let result: unknown;
+  try {
+    result = JSON.parse(output);
+  } catch {
+    // Diagnose malformed output without logging private document contents.
+  }
+  const document = isRecord(result) ? result : {};
+  const diagnostic = {
+    documentRef: createHash('sha256').update(docId).digest('hex').slice(0, 12),
+    outputBytes: Buffer.byteLength(output),
+    textBytes:
+      typeof document.text === 'string'
+        ? Buffer.byteLength(document.text)
+        : null,
+    chipCount: Array.isArray(document.chips) ? document.chips.length : 0,
+    linkCount: Array.isArray(document.links) ? document.links.length : 0,
+    maxTextBytes: MAX_DOC_CONTENT_BYTES,
+    responseShape: Array.isArray(result) ? 'array' : typeof result,
+  };
+  if (!isRecord(result) || typeof result.text !== 'string') {
+    logger.error(diagnostic, 'Google Docs response missing text field');
+    throw new Error(
+      'Google Docs response missing text field; check gog output compatibility (docs.cat must preserve its JSON envelope)',
+    );
+  }
+  logger.info(diagnostic, 'Google Docs text extracted');
+  return output;
 }
 
 function boundedDriveMax(value: unknown, fallback: number): number {

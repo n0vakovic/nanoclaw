@@ -588,3 +588,14 @@ describe('private X account actions', () => {
     },
   );
 });
+
+it('includes deployed build identity and recovery advice for unknown actions', async () => {
+  const result = await dispatchAction(
+    { action: 'missingAction', requestId: 'unknown-action' },
+    mainContext,
+  );
+  expect(result.ok).toBe(false);
+  expect(result.output).toContain('Unknown action: "missingAction"');
+  expect(result.output).toContain('Host build:');
+  expect(result.output).toContain('rebuild and restart');
+});

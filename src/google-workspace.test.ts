@@ -17,6 +17,7 @@ afterEach(() => {
   delete process.env.GOOGLE_POLICY_PATH;
   delete process.env.GOG_ARGS_LOG;
   delete process.env.GOG_FAKE_FAIL_CREATE;
+  delete process.env.GOG_FAKE_DOCS_CHIPS_ONLY;
   fs.rmSync(tempDir, { recursive: true, force: true });
   vi.restoreAllMocks();
 });
@@ -34,6 +35,10 @@ if (args[0] === 'calendar' && args[1] === 'create') {
   console.log(JSON.stringify({ id: 'event-created' }));
 } else if (args[0] === 'calendar' && args[1] === 'event') {
   console.log(JSON.stringify({ id: args[3], attendees: [] }));
+} else if (args[0] === 'docs' && args[1] === 'cat') {
+  const chips = [{ type: 'date', displayText: 'Oct 22, 2026' }];
+  const payload = { text: 'Experiment 1\\nExperiment 2', chips, renderedText: 'Oct 22, 2026 Experiment 1 Experiment 2' };
+  console.log(JSON.stringify(args.includes('--results-only') || process.env.GOG_FAKE_DOCS_CHIPS_ONLY ? chips : payload));
 } else {
   console.log(JSON.stringify({ items: [] }));
 }
@@ -106,6 +111,47 @@ async function waitFor(
 }
 
 describe('Google host broker', () => {
+  it('preserves body text and smart chips together in Docs responses', async () => {
+    writePolicy(installFakeGog());
+    const google = await import('./google-workspace.js');
+    const output = JSON.parse(
+      await google.googleDocsRead(
+        { docs: 'work_docs', docId: 'document_0123456789' },
+        'main',
+      ),
+    );
+    expect(output.text).toContain('Experiment 1');
+    expect(output.text).toContain('Experiment 2');
+    expect(output.chips).toHaveLength(1);
+    const args = JSON.parse(
+      fs.readFileSync(process.env.GOG_ARGS_LOG!, 'utf8').trim(),
+    );
+    expect(args).not.toContain('--results-only');
+    expect(args).toEqual(
+      expect.arrayContaining([
+        '--readonly',
+        '--wrap-untrusted',
+        '--json',
+        '--max-bytes',
+        '500000',
+        '--enable-commands-exact',
+        'docs.cat',
+      ]),
+    );
+  });
+
+  it('reports incompatible Docs output instead of silently returning only chips', async () => {
+    writePolicy(installFakeGog());
+    process.env.GOG_FAKE_DOCS_CHIPS_ONLY = '1';
+    const google = await import('./google-workspace.js');
+    await expect(
+      google.googleDocsRead(
+        { docs: 'work_docs', docId: 'document_0123456789' },
+        'main',
+      ),
+    ).rejects.toThrow('Google Docs response missing text field');
+  });
+
   it('forces read-only safety flags on calendar reads', async () => {
     writePolicy(installFakeGog());
     const google = await import('./google-workspace.js');

@@ -28,6 +28,7 @@ import {
 import { readEnvFile } from './env.js';
 import { fetchWithTimeout } from './timeout.js';
 import { logger } from './logger.js';
+import { readBuildIdentity } from './recovery.js';
 import { isValidGroupFolder, resolveGroupFolderPath } from './group-folder.js';
 import {
   acknowledgeIntergroupInboxItem,
@@ -1906,10 +1907,15 @@ export async function dispatchAction(
 ): Promise<ActionResult> {
   const handler = ACTION_REGISTRY[request.action];
   if (!handler) {
+    const build = readBuildIdentity();
+    logger.warn(
+      { action: request.action, requestId: request.requestId, build },
+      'Unknown host action; check deployed build and restart after rebuilding',
+    );
     return {
       requestId: request.requestId,
       ok: false,
-      output: `Unknown action: "${request.action}". Available: ${Object.keys(ACTION_REGISTRY).join(', ')}`,
+      output: `Unknown action: "${request.action}". Available: ${Object.keys(ACTION_REGISTRY).join(', ')}. Host build: ${build.sha} (${build.builtAt}). If this tool was recently added, rebuild and restart the host.`,
     };
   }
 
