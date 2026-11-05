@@ -168,6 +168,16 @@ export class TelegramIngress<T extends IngressUpdate> {
         const receipt = record.file.replace(/\.json$/, '.done');
         const fd = fs.openSync(receipt, 'w', 0o600);
         try {
+          // Keep the original payload after dispatch: an update can complete
+          // successfully without matching a channel handler.
+          fs.writeFileSync(
+            fd,
+            JSON.stringify({
+              receivedAt: record.receivedAt,
+              completedAt: Date.now(),
+              update: record.update,
+            }),
+          );
           fs.fsyncSync(fd);
         } finally {
           fs.closeSync(fd);

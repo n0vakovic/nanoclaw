@@ -1,3 +1,4 @@
+import { normalizeTelegramRichMessage } from '../telegram-rich-message.js';
 import { saveTelegramAttachment } from '../telegram-media.js';
 import { parseShareIntent } from '../artifact-controls.js';
 import fs from 'fs';
@@ -142,7 +143,8 @@ function wrapReplyContext(
   } else if (replyTo.sticker) {
     quoted = '[sticker]';
   } else {
-    quoted = '[message]';
+    quoted =
+      '[quoted message content unavailable — do not claim to have read it or infer its contents from another message]';
   }
 
   if (quoted.length > maxLen) {
@@ -786,6 +788,26 @@ export class TelegramChannel implements Channel {
       },
     );
     this.bot.use((ctx, next) => this.ingress!.handle(ctx.update, next));
+    this.bot.use(async (ctx, next) => {
+      logger.info(
+        {
+          updateId: ctx.update.update_id,
+          updateTypes: Object.keys(ctx.update).filter(
+            (key) => key !== 'update_id',
+          ),
+          chatJid: ctx.chat ? `tg:${ctx.chat.id}` : undefined,
+          messageId: ctx.msg?.message_id,
+          messageFields: ctx.msg ? Object.keys(ctx.msg) : undefined,
+          textLength: ctx.msg?.text?.length,
+        },
+        'Telegram update dispatch started',
+      );
+      await next();
+    });
+    this.bot.use(async (ctx, next) => {
+      normalizeTelegramRichMessage(ctx.message);
+      await next();
+    });
     const guard = createHandlerTimeoutMiddleware(TELEGRAM_HANDLER_TIMEOUT_MS);
     // The durable worker must observe the actual handler completion. Abandoning
     // it on a timeout would delete the journal while its side effects still run.
@@ -1178,7 +1200,7 @@ export class TelegramChannel implements Channel {
         fs.writeFileSync(path.join(mediaDir, filename), buffer);
 
         const containerPath = `/workspace/ipc/media/${filename}`;
-        content = `[Photo: ${containerPath}]${caption}\n\nThe image is at ${containerPath} — use Read to view it, then delete it with Bash when done.`;
+        content = `[Photo: ${containerPath}]${caption}\n\nThe image is at ${containerPath} — use Read to view it. Keep the original file so it can be rechecked if the user requests corrections.`;
         logger.info(
           { chatJid, filename, bytes: buffer.length },
           'Saved Telegram photo to IPC media',
@@ -1394,6 +1416,21 @@ export class TelegramChannel implements Channel {
         timestamp,
         is_from_me: false,
       });
+    });
+
+    this.bot.use((ctx) => {
+      logger.warn(
+        {
+          updateId: ctx.update.update_id,
+          updateTypes: Object.keys(ctx.update).filter(
+            (key) => key !== 'update_id',
+          ),
+          chatJid: ctx.chat ? `tg:${ctx.chat.id}` : undefined,
+          messageId: ctx.msg?.message_id,
+          messageFields: ctx.msg ? Object.keys(ctx.msg) : undefined,
+        },
+        'Telegram update did not match a handler; ordinary payload retained in ingress receipt',
+      );
     });
 
     // Handle errors gracefully

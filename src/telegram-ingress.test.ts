@@ -53,6 +53,13 @@ describe('durable Telegram ingress', () => {
     await settle();
     expect(seen).toEqual([1, 2]);
     expect(fs.existsSync(path.join(directory, '2.done'))).toBe(true);
+    expect(
+      JSON.parse(fs.readFileSync(path.join(directory, '2.done'), 'utf8')),
+    ).toEqual({
+      receivedAt: expect.any(Number),
+      completedAt: expect.any(Number),
+      update: { update_id: 2 },
+    });
   });
 
   it('replays startup journal once and persistently deduplicates completed updates', async () => {
