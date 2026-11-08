@@ -22,6 +22,8 @@ import {
   TELEGRAM_MEDIA_TIMEOUT_MS,
   RETAINED_TRANSCRIPTION_TIMEOUT_MS,
   RETAINED_VOICE_RETRY_DELAYS_MS,
+  RETAINED_VOICE_MAX_RETRIES,
+  RETAINED_VOICE_MAX_AGE_MS,
 } from '../config.js';
 import { readEnvFile } from '../env.js';
 import {
@@ -373,6 +375,14 @@ export class TelegramChannel implements Channel {
       typeof retained.metadata.retry_count === 'number'
         ? retained.metadata.retry_count
         : 0;
+    const exhaustedReason = this.retainedVoiceExhaustedReason(
+      retained,
+      retryCount,
+    );
+    if (exhaustedReason) {
+      void this.giveUpRetainedVoice(retained, retryCount, exhaustedReason);
+      return;
+    }
     const delays =
       RETAINED_VOICE_RETRY_DELAYS_MS.length > 0
         ? RETAINED_VOICE_RETRY_DELAYS_MS
@@ -400,6 +410,115 @@ export class TelegramChannel implements Channel {
       },
       'Scheduled retained Telegram voice transcription retry',
     );
+  }
+
+  private retainedVoiceExhaustedReason(
+    retained: RetainedTelegramVoice,
+    retryCount: number,
+  ): string | null {
+    if (retryCount >= RETAINED_VOICE_MAX_RETRIES) {
+      return `retry_count ${retryCount} reached limit ${RETAINED_VOICE_MAX_RETRIES}`;
+    }
+    const receivedAt = Date.parse(String(retained.metadata.received_at));
+    if (
+      Number.isFinite(receivedAt) &&
+      Date.now() - receivedAt >= RETAINED_VOICE_MAX_AGE_MS
+    ) {
+      const hours = Math.round((Date.now() - receivedAt) / 3_600_000);
+      return `voice is ${hours}h old, past the ${Math.round(
+        RETAINED_VOICE_MAX_AGE_MS / 3_600_000,
+      )}h retry window`;
+    }
+    return null;
+  }
+
+  /**
+   * Terminal state for a retained voice note that never transcribed. The audio
+   * stays on disk for manual recovery; the chat is told once, and the
+   * notice timestamp is persisted before sending so a crash or restart can
+   * never produce a second notice.
+   */
+  private async giveUpRetainedVoice(
+    retained: RetainedTelegramVoice,
+    retryCount: number,
+    reason: string,
+  ): Promise<void> {
+    let audioBytes: number | null = null;
+    try {
+      audioBytes = retained.hostAudioPath
+        ? fs.statSync(retained.hostAudioPath).size
+        : null;
+    } catch {
+      audioBytes = null;
+    }
+    const diagnostic = retained.metadata.transcription_diagnostic as
+      | Record<string, unknown>
+      | undefined;
+    logger.warn(
+      {
+        audioPath: retained.containerAudioPath,
+        hostAudioPath: retained.hostAudioPath,
+        audioExists: audioBytes !== null,
+        audioBytes,
+        retryCount,
+        reason,
+        receivedAt: retained.metadata.received_at ?? null,
+        lastStatus: retained.metadata.status ?? null,
+        lastRetryError: retained.metadata.retry_error ?? null,
+        lastClassification: diagnostic?.classification ?? null,
+        lastDiagnostic: diagnostic ?? null,
+      },
+      'Giving up on retained Telegram voice transcription; audio kept',
+    );
+
+    const alreadyNotified = Boolean(retained.metadata.exhausted_notice_sent_at);
+    this.updateRetainedVoice(retained, {
+      status: 'retry_exhausted',
+      retry_count: retryCount,
+      next_retry_at: null,
+      retry_stopped_at: new Date().toISOString(),
+      exhausted_reason: reason,
+      exhausted_notice_sent_at: alreadyNotified
+        ? retained.metadata.exhausted_notice_sent_at
+        : new Date().toISOString(),
+    });
+    if (alreadyNotified) return;
+
+    const chatJid = retained.metadata.chat_jid;
+    if (!this.bot || typeof chatJid !== 'string' || !chatJid.startsWith('tg:'))
+      return;
+    const chatId = chatJid.replace(/^tg:/, '');
+    const receivedAt = Date.parse(String(retained.metadata.received_at));
+    const when = Number.isFinite(receivedAt)
+      ? ` from ${new Date(receivedAt).toLocaleDateString('en-GB', {
+          day: 'numeric',
+          month: 'short',
+          year: 'numeric',
+          timeZone: 'UTC',
+        })}`
+      : '';
+    const messageId = Number(retained.metadata.telegram_message_id);
+    try {
+      await this.bot.api.sendMessage(
+        chatId,
+        `I couldn't transcribe your voice note${when}${
+          retryCount > 0 ? `, even after ${retryCount} automatic retries,` : ''
+        } so I've stopped retrying. The audio is still saved on the server. If it still matters, please resend it or type out the gist.`,
+        Number.isInteger(messageId) && messageId > 0
+          ? {
+              reply_parameters: {
+                message_id: messageId,
+                allow_sending_without_reply: true,
+              },
+            }
+          : {},
+      );
+    } catch (err) {
+      logger.warn(
+        { err, chatJid, audioPath: retained.containerAudioPath },
+        'Failed to send retained voice give-up notice',
+      );
+    }
   }
 
   private persistRecoveredTranscript(

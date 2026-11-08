@@ -9,6 +9,7 @@ const fsMock = vi.hoisted(() => ({
   existsSync: vi.fn(() => false),
   readdirSync: vi.fn(() => [] as string[]),
   readFileSync: vi.fn(),
+  statSync: vi.fn(() => ({ size: 21 })),
 }));
 vi.mock('fs', () => ({ default: fsMock }));
 
@@ -34,6 +35,8 @@ vi.mock('../config.js', () => ({
   TELEGRAM_MEDIA_TIMEOUT_MS: 15000,
   RETAINED_TRANSCRIPTION_TIMEOUT_MS: 120000,
   RETAINED_VOICE_RETRY_DELAYS_MS: [10],
+  RETAINED_VOICE_MAX_RETRIES: 3,
+  RETAINED_VOICE_MAX_AGE_MS: 48 * 60 * 60 * 1000,
   TRANSCRIPTION_TIMEOUT_MS: 45000,
 }));
 
@@ -510,6 +513,139 @@ describe('TelegramChannel', () => {
           ),
         }),
       );
+      await channel.disconnect();
+    });
+  });
+
+  describe('retained voice retry limits', () => {
+    const persistRetained = (metadata: Record<string, unknown>) => {
+      fsMock.existsSync.mockReturnValue(true);
+      fsMock.readdirSync.mockReturnValue(['voice_90.json']);
+      fsMock.readFileSync.mockImplementation((filePath: unknown) =>
+        String(filePath).endsWith('.json')
+          ? JSON.stringify({
+              chat_jid: 'tg:100200300',
+              telegram_message_id: '90',
+              audio_path: '/workspace/ipc/media/voice_90.oga',
+              ...metadata,
+            })
+          : Buffer.from('audio bytes'),
+      );
+    };
+    const metadataWrites = () =>
+      fsMock.writeFileSync.mock.calls
+        .filter(([p]) => String(p).endsWith('voice_90.json'))
+        .map(([, body]) => JSON.parse(String(body)));
+
+    it('still schedules a retry while under the cap', async () => {
+      vi.useFakeTimers();
+      persistRetained({
+        status: 'transcription_failed',
+        retry_count: 1,
+        received_at: new Date().toISOString(),
+      });
+      const channel = new TelegramChannel('test-token', createTestOpts());
+
+      await channel.connect();
+
+      expect(metadataWrites().at(-1)).toMatchObject({
+        status: 'retry_scheduled',
+        retry_count: 1,
+      });
+      expect(currentBot().api.sendMessage).not.toHaveBeenCalled();
+      await channel.disconnect();
+    });
+
+    it('stops retrying and notifies once when the attempt cap is reached', async () => {
+      vi.useFakeTimers();
+      persistRetained({
+        status: 'retry_scheduled',
+        retry_count: 2,
+        received_at: new Date().toISOString(),
+      });
+      transcribeAudioMock.mockResolvedValue(null);
+      const channel = new TelegramChannel('test-token', createTestOpts());
+
+      await channel.connect();
+      await vi.advanceTimersByTimeAsync(10);
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(transcribeAudioMock).toHaveBeenCalledTimes(1);
+      const last = metadataWrites().at(-1);
+      expect(last).toMatchObject({
+        status: 'retry_exhausted',
+        retry_count: 3,
+        next_retry_at: null,
+      });
+      expect(last.exhausted_notice_sent_at).toEqual(expect.any(String));
+      expect(fsMock.unlinkSync).not.toHaveBeenCalled();
+      expect(currentBot().api.sendMessage).toHaveBeenCalledTimes(1);
+      expect(currentBot().api.sendMessage).toHaveBeenCalledWith(
+        '100200300',
+        expect.stringContaining("couldn't transcribe your voice note"),
+        expect.objectContaining({
+          reply_parameters: expect.objectContaining({ message_id: 90 }),
+        }),
+      );
+      await channel.disconnect();
+    });
+
+    it('resolves a legacy item with a huge retry count on startup', async () => {
+      vi.useFakeTimers();
+      persistRetained({
+        status: 'retry_scheduled',
+        retry_count: 1842,
+        received_at: '2026-09-20T10:00:00.000Z',
+        transcription_diagnostic: { classification: 'upload_rejected' },
+      });
+      const channel = new TelegramChannel('test-token', createTestOpts());
+
+      await channel.connect();
+      await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+
+      expect(transcribeAudioMock).not.toHaveBeenCalled();
+      expect(metadataWrites().at(-1)).toMatchObject({
+        status: 'retry_exhausted',
+        retry_count: 1842,
+      });
+      expect(currentBot().api.sendMessage).toHaveBeenCalledTimes(1);
+      expect(currentBot().api.sendMessage).toHaveBeenCalledWith(
+        '100200300',
+        expect.stringContaining('voice note from 20 Sep'),
+        expect.anything(),
+      );
+      await channel.disconnect();
+    });
+
+    it('gives up on an item past the age window without re-notifying', async () => {
+      vi.useFakeTimers();
+      persistRetained({
+        status: 'transcription_failed',
+        retry_count: 0,
+        received_at: new Date(Date.now() - 49 * 60 * 60 * 1000).toISOString(),
+        exhausted_notice_sent_at: '2026-11-01T00:00:00.000Z',
+      });
+      const channel = new TelegramChannel('test-token', createTestOpts());
+
+      await channel.connect();
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(transcribeAudioMock).not.toHaveBeenCalled();
+      expect(metadataWrites().at(-1)).toMatchObject({
+        status: 'retry_exhausted',
+      });
+      expect(currentBot().api.sendMessage).not.toHaveBeenCalled();
+      await channel.disconnect();
+    });
+
+    it('does not resume items that are already exhausted', async () => {
+      persistRetained({ status: 'retry_exhausted', retry_count: 1842 });
+      const channel = new TelegramChannel('test-token', createTestOpts());
+
+      await channel.connect();
+
+      expect(metadataWrites()).toHaveLength(0);
+      expect(currentBot().api.sendMessage).not.toHaveBeenCalled();
       await channel.disconnect();
     });
   });

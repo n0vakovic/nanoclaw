@@ -48,7 +48,7 @@ is still stored, rather than the whole handler being abandoned.
 | Automatic word-timestamp attempt                            | `transcription.ts` (`whisper-1`, verbose JSON)                       | `TRANSCRIPTION_TIMEOUT_MS` = 30s                                         | preserves pause markers when the word-timestamp path is healthy                                                                       |
 | Automatic plain-text fallback                               | `transcription.ts` (`gpt-4o-mini-transcribe`, JSON)                  | `TRANSCRIPTION_FALLBACK_TIMEOUT_MS` = 30s                                | uses a different model/request shape when word timestamps stall; both attempts fit inside the handler budget                          |
 | Retained-audio retry                                        | `host-actions.ts` and automatic retry in `telegram.ts`               | `RETAINED_TRANSCRIPTION_TIMEOUT_MS` = 120s                               | gives the simpler plain-transcription request room to recover without blocking Telegram's inbound handler                             |
-| Durable retained-audio backoff                              | `telegram.ts`                                                        | `RETAINED_VOICE_RETRY_DELAYS_MS` = 30s, 2m, 10m, 30m (then 30m)          | retries indefinitely, resumes from metadata after restart, and injects a recovered transcript back into the original conversation     |
+| Durable retained-audio backoff                              | `telegram.ts`                                                        | `RETAINED_VOICE_RETRY_DELAYS_MS` = 30s, 2m, 10m, 30m (then 30m)          | gives up after 48h or 100 attempts (`retry_exhausted`, audio kept, chat told once), resumes from metadata after restart, and injects a recovered transcript back into the original conversation |
 | Inbound handler backstop (`createHandlerTimeoutMiddleware`) | first `bot.use()` in `telegram.ts`                                   | `TELEGRAM_HANDLER_TIMEOUT_MS` = 90s                                      | grammy's poll loop — no single update can block it longer than the budget; on timeout the handler is abandoned and the loop continues |
 | Outbound API backstop (`createApiTimeoutTransformer`)       | `bot.api.config.use()` in `telegram.ts`                              | `TELEGRAM_API_TIMEOUT_MS` = 30s                                          | every `bot.api.*` send — a stalled send can't freeze the IPC watcher or the container output chain                                    |
 
@@ -82,6 +82,12 @@ it as a new inbound recovery message so the agent receives the content without
 the user resending or reconstructing it. Startup scans persisted retry metadata
 and resumes any interrupted backoff. Explicit agent retries mark the metadata as
 `manual_retry_in_progress`, preventing overlap with the automatic worker.
+
+Automatic retries are finite: once a voice note is older than
+`RETAINED_VOICE_MAX_AGE_MS` (48h) or has used `RETAINED_VOICE_MAX_RETRIES`
+(100) attempts, the metadata moves to `retry_exhausted`, the host logs the last
+diagnostic with the audio file's size, and the chat gets one notice (guarded by
+`exhausted_notice_sent_at`). The audio file is kept for manual recovery.
 
 Telegram's `.oga` filename suffix is normalized to `.ogg` only for the OpenAI
 multipart upload. The retained filename and bytes are unchanged. OpenAI rejects

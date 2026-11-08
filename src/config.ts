@@ -50,6 +50,17 @@ export const RETAINED_VOICE_RETRY_DELAYS_MS = (
   .split(',')
   .map((value) => parseInt(value.trim(), 10))
   .filter((value) => Number.isFinite(value) && value >= 0);
+// Retained voice retries stop after whichever limit is hit first. With the
+// default backoff (ending at 30m) 48h is roughly 95 attempts; the attempt cap
+// is a backstop for metadata that lacks a usable received_at timestamp.
+export const RETAINED_VOICE_MAX_RETRIES = parseInt(
+  process.env.RETAINED_VOICE_MAX_RETRIES || '100',
+  10,
+);
+export const RETAINED_VOICE_MAX_AGE_MS = parseInt(
+  process.env.RETAINED_VOICE_MAX_AGE_MS || String(48 * 60 * 60 * 1000),
+  10,
+);
 export const TELEGRAM_API_TIMEOUT_MS = parseInt(
   process.env.TELEGRAM_API_TIMEOUT_MS || '30000',
   10,
