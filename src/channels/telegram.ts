@@ -1222,6 +1222,8 @@ export class TelegramChannel implements Channel {
       // Deliver message — startMessageLoop() will pick it up
       this.opts.onMessage(chatJid, {
         id: msgId,
+        reply_to_message_id:
+          ctx.message.reply_to_message?.message_id?.toString(),
         chat_jid: chatJid,
         sender,
         sender_name: senderName,
@@ -1268,6 +1270,8 @@ export class TelegramChannel implements Channel {
       );
       this.opts.onMessage(chatJid, {
         id: ctx.message.message_id.toString(),
+        reply_to_message_id:
+          ctx.message.reply_to_message?.message_id?.toString(),
         chat_jid: chatJid,
         sender: ctx.from?.id?.toString() || '',
         sender_name: senderName,
@@ -1336,6 +1340,8 @@ export class TelegramChannel implements Channel {
 
       this.opts.onMessage(chatJid, {
         id: ctx.message.message_id.toString(),
+        reply_to_message_id:
+          ctx.message.reply_to_message?.message_id?.toString(),
         chat_jid: chatJid,
         sender: ctx.from?.id?.toString() || '',
         sender_name: senderName,
@@ -1448,6 +1454,8 @@ export class TelegramChannel implements Channel {
 
       this.opts.onMessage(chatJid, {
         id: ctx.message.message_id.toString(),
+        reply_to_message_id:
+          ctx.message.reply_to_message?.message_id?.toString(),
         chat_jid: chatJid,
         sender: ctx.from?.id?.toString() || '',
         sender_name: senderName,

@@ -1,5 +1,12 @@
 import { readXAccount } from './x-account.js';
 import { getArtifactService } from './artifact-server.js';
+import {
+  getChatShare,
+  listChatShares,
+  readChatShare,
+  shareReceipt,
+} from './artifact-chat.js';
+import { privateShareOwnerChat } from './artifact-controls.js';
 import { readChatOutputs } from './delivered-output.js';
 /**
  * Host Action Registry for NanoClaw
@@ -14,6 +21,7 @@ import path from 'path';
 import { createHash } from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { z } from 'zod';
 
 const execFileAsync = promisify(execFile);
 
@@ -632,9 +640,56 @@ export function configureBackgroundJobs(handler: ActionHandler): void {
   backgroundJobAction = handler;
 }
 
+function artifactChat(ctx?: ActionContext) {
+  const groups = ctx?.registeredGroups?.() ?? {};
+  const jid = ctx?.sourceChatJid;
+  if (!ctx || !jid || groups[jid]?.folder !== ctx.sourceGroup)
+    throw new Error('Share tools require registered chat context');
+  return { groups, jid, store: getArtifactService().store };
+}
+
+const shareId = z.string().regex(/^[a-f0-9]{36}$/);
+
 const ACTION_REGISTRY: Record<string, ActionHandler> = {
   readChatOutputs: async (params, ctx) =>
     readChatOutputs(ctx?.sourceChatJid, params),
+  listSharedArtifacts: async (params, ctx) => {
+    const { jid, store } = artifactChat(ctx);
+    const { query, limit } = z
+      .object({
+        query: z.string().max(200).optional(),
+        limit: z.number().int().min(1).max(20).optional(),
+      })
+      .parse(params ?? {});
+    return JSON.stringify(listChatShares(store, jid, query, limit));
+  },
+  readSharedArtifact: async (params, ctx) => {
+    const { jid, store } = artifactChat(ctx);
+    const { id, file, offset, fileOffset } = z
+      .object({
+        id: shareId,
+        file: z.string().max(512).optional(),
+        offset: z
+          .number()
+          .int()
+          .min(0)
+          .max(50 * 1024 ** 3)
+          .optional(),
+        fileOffset: z.number().int().min(0).max(1000).optional(),
+      })
+      .parse(params);
+    return JSON.stringify(
+      readChatShare(store, jid, id, file, offset, fileOffset),
+    );
+  },
+  pinSharedArtifact: async (params, ctx) => {
+    const { groups, jid, store } = artifactChat(ctx);
+    if (jid !== privateShareOwnerChat(groups))
+      throw new Error('Pinning shares requires the private main chat');
+    const { id } = z.object({ id: shareId }).parse(params);
+    getChatShare(store, jid, id);
+    return JSON.stringify(shareReceipt(store, store.pin(id, true)));
+  },
   shareArtifact: async (params, ctx) => {
     if (
       !ctx?.sourceGroup ||

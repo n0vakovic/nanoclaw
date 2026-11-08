@@ -199,6 +199,12 @@ export function parseShareIntent(
   if (t === 'publish this' || t === 'publish this as a gist')
     return { action: 'clarify' };
 }
+export function privateShareOwnerChat(groups: Record<string, RegisteredGroup>) {
+  return Object.keys(groups).find(
+    (jid) => groups[jid].isMain && /^tg:[1-9][0-9]*$/.test(jid),
+  );
+}
+
 export async function artifactControl(
   store: ArtifactStore,
   groups: Record<string, RegisteredGroup>,
@@ -206,12 +212,8 @@ export async function artifactControl(
   msg: NewMessage,
   args: string,
 ) {
-  const owner = Object.entries(groups).find(
-    ([key, g]) => g.isMain && /^tg:[1-9][0-9]*$/.test(key),
-  );
   if (
-    !owner ||
-    jid !== owner[0] ||
+    jid !== privateShareOwnerChat(groups) ||
     msg.sender !== jid.slice(3) ||
     msg.is_bot_message
   )

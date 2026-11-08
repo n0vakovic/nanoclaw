@@ -9,6 +9,9 @@ import {
   openBeneath,
 } from './artifact-store.js';
 import { artifactControl, promote } from './artifact-controls.js';
+import { recentShareContext, shareReplyReference } from './artifact-chat.js';
+import { ArtifactService, setArtifactService } from './artifact-server.js';
+import { dispatchAction } from './host-actions.js';
 const stores: ArtifactStore[] = [];
 const roots: string[] = [];
 function setup(extra = {}) {
@@ -49,6 +52,94 @@ afterEach(() => {
     fs.rmSync(r, { recursive: true, force: true });
 });
 describe('artifact store', () => {
+  it('lets the destination discuss and keep a delivered Mac upload by its original Telegram message', async () => {
+    const directory = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'artifact-chat-test-'),
+    );
+    roots.push(directory);
+    const service = new ArtifactService({
+      directory,
+      apiOrigin: 'https://api.example',
+      previewOrigin: 'https://preview.example:8443',
+      apiPort: 0,
+      previewPort: 0,
+    });
+    const s = service.store;
+    stores.push(s);
+    const text = 'a'.repeat(16_383) + '🌍 final';
+    const r = add(s, 'request-123', text, 'README.md');
+    expect(recentShareContext(s, 'tg:123')).toBe('');
+    await s.notify(async () => '321');
+    expect(shareReplyReference(s, 'tg:123', '321')).toContain(r.id);
+    expect(shareReplyReference(s, 'tg:456', '321')).toBe('');
+    expect(recentShareContext(s, 'tg:123')).toContain(r.id);
+    expect(recentShareContext(s, 'tg:456')).toBe('');
+
+    const groups = () => ({
+      'tg:123': {
+        folder: 'main',
+        isMain: true,
+        name: 'Main',
+        trigger: '',
+        added_at: '',
+      },
+      'tg:456': { folder: 'other', name: 'Other', trigger: '', added_at: '' },
+    });
+    setArtifactService(service);
+    const call = (
+      action: string,
+      params: Record<string, unknown>,
+      jid = 'tg:123',
+    ) =>
+      dispatchAction(
+        { action, requestId: 'test-share-action', params },
+        {
+          sourceChatJid: jid,
+          sourceGroup: jid === 'tg:123' ? 'main' : 'other',
+          groupIpcDir: s.directory,
+          registeredGroups: groups,
+        },
+      );
+    try {
+      const listed = await call('listSharedArtifacts', { query: 'report' });
+      expect(JSON.parse(listed.output)).toMatchObject([
+        { id: r.id, uploader: 'mac' },
+      ]);
+      expect(
+        (await call('readSharedArtifact', { id: r.id }, 'tg:456')).ok,
+      ).toBe(false);
+      expect(
+        (await call('readSharedArtifact', { id: r.id, file: '../README.md' }))
+          .ok,
+      ).toBe(false);
+      const page = JSON.parse(
+        (await call('readSharedArtifact', { id: r.id })).output,
+      );
+      expect(page.file).toBe('README.md');
+      const next = JSON.parse(
+        (
+          await call('readSharedArtifact', {
+            id: r.id,
+            offset: page.nextByteOffset,
+          })
+        ).output,
+      );
+      expect(page.content + next.content).toBe(text);
+      expect(next.nextByteOffset).toBeNull();
+      expect((await call('pinSharedArtifact', { id: r.id }, 'tg:456')).ok).toBe(
+        false,
+      );
+      const pinned = await call('pinSharedArtifact', { id: r.id });
+      expect(JSON.parse(pinned.output)).toMatchObject({
+        pinned: true,
+        expiresAt: null,
+      });
+      expect(await call('pinSharedArtifact', { id: r.id })).toEqual(pinned);
+      expect(s.byMessage('tg:123', '321')).toBe(r.id);
+    } finally {
+      setArtifactService(undefined);
+    }
+  });
   it('hashes credentials and restricts ownership', () => {
     const s = setup();
     const token = s.issue('mac', 'tg:123');

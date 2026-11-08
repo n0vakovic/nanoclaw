@@ -865,12 +865,22 @@ describe('TelegramChannel', () => {
       await channel.connect();
 
       const ctx = createReplyToVoiceCtx('VOICE_42', 'you never processed this');
-      await triggerTextMessage(ctx as any);
+      await triggerTextMessage({
+        ...ctx,
+        message: {
+          ...ctx.message,
+          reply_to_message: {
+            ...ctx.message.reply_to_message,
+            message_id: 321,
+          },
+        },
+      } as any);
 
       // It fetched the quoted voice by its file_id rather than dropping it.
       expect(currentBot().api.getFile).toHaveBeenCalledWith('VOICE_42');
       // The transcript is surfaced to the agent in the reply context.
       const delivered = (opts.onMessage as any).mock.calls[0][1];
+      expect(delivered.reply_to_message_id).toBe('321');
       expect(delivered.content).toContain('the words in the missed voice note');
       expect(delivered.content).toContain('you never processed this');
 

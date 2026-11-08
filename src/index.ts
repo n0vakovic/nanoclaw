@@ -4,6 +4,7 @@ import {
   setArtifactService,
   getArtifactService,
 } from './artifact-server.js';
+import { recentShareContext, shareReplyReference } from './artifact-chat.js';
 import { artifactControl } from './artifact-controls.js';
 import fs from 'fs';
 import path from 'path';
@@ -106,6 +107,14 @@ const channels: Channel[] = [];
 const queue = new GroupQueue();
 let jobs: JobManager;
 let runtimeReady = false;
+let artifactService: ArtifactService | undefined;
+
+function chatHistoryContext(chatJid: string): string {
+  return (
+    deliveredOutputContext(chatJid) +
+    (artifactService ? recentShareContext(artifactService.store, chatJid) : '')
+  );
+}
 let runtimeFailure: string | undefined;
 const recoveryEpoch = new Map<string, number>();
 const activity = new Map<string, { phase: string; at: string }>();
@@ -349,7 +358,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 
   const prompt =
-    deliveredOutputContext(chatJid) + formatMessages(missedMessages, TIMEZONE);
+    chatHistoryContext(chatJid) + formatMessages(missedMessages, TIMEZONE);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -857,7 +866,7 @@ async function startMessageLoop(): Promise<void> {
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
           const formatted =
-            deliveredOutputContext(chatJid) +
+            chatHistoryContext(chatJid) +
             formatMessages(messagesToSend, TIMEZONE);
 
           if (queue.sendMessage(chatJid, formatted)) {
@@ -940,8 +949,6 @@ async function main(): Promise<void> {
     CREDENTIAL_PROXY_PORT,
     PROXY_BIND_HOST,
   );
-
-  let artifactService: ArtifactService | undefined;
 
   // Graceful shutdown handlers
   let shuttingDown = false;
@@ -1125,7 +1132,15 @@ async function main(): Promise<void> {
           return;
         }
       }
-      storeMessage(msg);
+      const shareReference =
+        artifactService && msg.reply_to_message_id
+          ? shareReplyReference(
+              artifactService.store,
+              chatJid,
+              msg.reply_to_message_id,
+            )
+          : '';
+      storeMessage({ ...msg, content: msg.content + shareReference });
       if (!runtimeReady && registeredGroups[chatJid]) {
         void sendStrict(
           chatJid,
@@ -1181,6 +1196,12 @@ async function main(): Promise<void> {
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
     registeredGroups: () => registeredGroups,
   };
+
+  const previewConfig = artifactConfig();
+  if (previewConfig) {
+    artifactService = new ArtifactService(previewConfig);
+    setArtifactService(artifactService);
+  }
 
   // Create and connect all registered channels.
   // Each channel self-registers via the barrel import above.
@@ -1254,10 +1275,7 @@ async function main(): Promise<void> {
     }
   });
 
-  const previewConfig = artifactConfig();
-  if (previewConfig) {
-    artifactService = new ArtifactService(previewConfig);
-    setArtifactService(artifactService);
+  if (artifactService) {
     await artifactService.start(async (jid, text) => {
       const channel = findChannel(channels, jid);
       if (!channel?.sendArtifactNotification)
