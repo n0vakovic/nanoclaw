@@ -1820,7 +1820,7 @@ server.tool(
  */
 server.tool(
   'innernet_log',
-  "Append an entry to Milan's personal innernet log. Use ONLY when Milan explicitly asks to log something (e.g. 'log that I went to the gym'). Never log proactively. Innernet auto-extracts tags from emoji/hashtags in the text, so the optional `tags` param is rarely needed.",
+  "Append an entry to Milan's personal innernet log. Use ONLY when Milan explicitly asks to log something (e.g. 'log that I went to the gym'). The one exception: rituals listed in the global ritual list (/workspace/global/rituals.md) may be logged on your own initiative, and only through innernet_ritual (not this tool). Never log anything else proactively. Innernet auto-extracts tags from emoji/hashtags in the text, so the optional `tags` param is rarely needed.",
   {
     text: z
       .string()
@@ -1905,12 +1905,27 @@ server.tool(
  */
 server.tool(
   'innernet_read',
-  "Read recent entries from Milan's personal innernet log. Use to ground analysis or answer questions like 'how's my week been?' or 'what have I logged about gym lately?'. Returns a JSON array of log entries (most recent first).",
+  "Read entries from Milan's personal innernet log, filtered on the server. Use to ground analysis or answer questions like 'how's my week been?' or 'what have I logged about gym lately?'. Returns a JSON array of log entries (most recent first), each with id, timestamp, text, tags, reflection, visibility, updated_at. Examples: last time a ritual happened: q=<emoji>, tag=ritual, limit=1. Every past date of a ritual: q=<emoji>, tag=ritual, with a large limit. Entries from one day: since=2026-11-08T00:00:00, until=2026-11-08T23:59:59.",
   {
+    q: z
+      .string()
+      .optional()
+      .describe(
+        'Case-insensitive substring of the entry text or reflection. Works with emoji.',
+      ),
+    tag: z.string().optional().describe("Exact tag, e.g. 'ritual'."),
+    since: z
+      .string()
+      .optional()
+      .describe('ISO 8601 timestamp, inclusive lower bound on entry time.'),
+    until: z
+      .string()
+      .optional()
+      .describe('ISO 8601 timestamp, inclusive upper bound on entry time.'),
     limit: z
       .number()
       .optional()
-      .describe('Max entries to return (default 50).'),
+      .describe('Max entries to return, applied after filtering (default 50).'),
   },
   async (args) => {
     const ACTIONS_DIR = path.join(IPC_DIR, 'actions');
@@ -1922,6 +1937,10 @@ server.tool(
       requestId,
       params: {
         op: 'read',
+        ...(args.q !== undefined ? { q: args.q } : {}),
+        ...(args.tag !== undefined ? { tag: args.tag } : {}),
+        ...(args.since !== undefined ? { since: args.since } : {}),
+        ...(args.until !== undefined ? { until: args.until } : {}),
         ...(args.limit !== undefined ? { limit: args.limit } : {}),
       },
     });
@@ -1963,6 +1982,163 @@ server.tool(
       isError: true,
     };
   },
+);
+
+/**
+ * Send one innernet host-action op and wait for its result, the same way
+ * innernet_log and innernet_read do.
+ */
+async function callInnernetAction(
+  toolName: string,
+  params: Record<string, unknown>,
+) {
+  const ACTIONS_DIR = path.join(IPC_DIR, 'actions');
+  const RESULTS_DIR = path.join(IPC_DIR, 'action-results');
+  const requestId = `innernet-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  writeIpcFile(ACTIONS_DIR, {
+    action: 'innernet',
+    requestId,
+    params,
+  });
+
+  const resultPath = path.join(RESULTS_DIR, `${requestId}.json`);
+  const maxWait = 30_000;
+  const pollInterval = 500;
+  let elapsed = 0;
+
+  while (elapsed < maxWait) {
+    if (fs.existsSync(resultPath)) {
+      const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+      fs.unlinkSync(resultPath);
+
+      if (!result.ok) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: `${toolName} failed: ${result.output}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+      return { content: [{ type: 'text' as const, text: result.output }] };
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollInterval));
+    elapsed += pollInterval;
+  }
+
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: `${toolName} timed out after 30 seconds.`,
+      },
+    ],
+    isError: true,
+  };
+}
+
+/**
+ * Fetch one innernet log entry by id.
+ */
+server.tool(
+  'innernet_get',
+  "Fetch a single entry from Milan's personal innernet log by id. Use it to re-read an entry right before rewriting it, so edits made elsewhere since you last saw it are not lost.",
+  {
+    id: z
+      .union([z.number(), z.string()])
+      .describe(
+        'The entry id (from innernet_read, innernet_log or innernet_ritual).',
+      ),
+  },
+  async (args) =>
+    callInnernetAction('innernet_get', { op: 'get', id: args.id }),
+);
+
+/**
+ * Overwrite fields of an existing innernet log entry.
+ */
+server.tool(
+  'innernet_update',
+  "Change an existing entry in Milan's personal innernet log by id. Every field you pass REPLACES the stored value; nothing is appended. To change notes, send the full new reflection, not just the new part. Use it to keep the current ritual entry's notes up to date, or to edit an older entry when Milan asks you to (find it first with innernet_read). Re-read the entry with innernet_get first if some time has passed since you last saw it.",
+  {
+    id: z.union([z.number(), z.string()]).describe('The entry id to change.'),
+    text: z
+      .string()
+      .optional()
+      .describe('New entry text (replaces the old text).'),
+    reflection: z
+      .string()
+      .optional()
+      .describe('The full new notes for the entry (replaces the old notes).'),
+    tags: z
+      .string()
+      .optional()
+      .describe('Comma-separated tags (replaces the old tags).'),
+    visibility: z
+      .enum(['public', 'private'])
+      .optional()
+      .describe("'public' or 'private'."),
+  },
+  async (args) =>
+    callInnernetAction('innernet_update', {
+      op: 'update',
+      id: args.id,
+      ...(args.text !== undefined ? { text: args.text } : {}),
+      ...(args.reflection !== undefined ? { reflection: args.reflection } : {}),
+      ...(args.tags !== undefined ? { tags: args.tags } : {}),
+      ...(args.visibility !== undefined ? { visibility: args.visibility } : {}),
+    }),
+);
+
+/**
+ * Find-or-create the current innernet entry for a ritual.
+ */
+server.tool(
+  'innernet_ritual',
+  "Log one of Milan's rituals in his innernet log. The rituals are listed in global memory at /workspace/global/rituals.md (in the main group, which has no /workspace/global mount, read it with read_global_memory file 'rituals.md'): for each one, its emoji, its name, the phrases Milan uses for it, how often it is meant to happen, and which alive-questions it answers. Only the main group can change the list (write_global_memory, file 'rituals.md'); if Milan wants a ritual added or changed from another group, tell him it has to be done from main, or pass it on with surface_to_main. Milan mostly sends voice messages, so recognize a ritual from his words, not from an emoji. Call this as soon as Milan starts a listed ritual; you do not need to be asked. The host decides whether this continues the current session (the newest entry for that emoji was changed in the last few hours) or starts a new private entry tagged 'ritual'. There is no session end. As the session goes on, call this again (or innernet_update with the returned id) whenever your notes change, always sending the FULL current notes as `reflection`; it replaces the old notes, it does not append, because Milan corrects your mistakes. If time has passed since your last write, re-read the entry with innernet_get first and build on what is there, so edits made elsewhere are not overwritten. Only edit an older session when Milan asks: find it with innernet_read (q=<emoji>, tag=ritual, since/until), then use innernet_update. Returns JSON: {id, created, entry, previous: {id, timestamp, updated_at} | null, hoursSincePrevious}, where previous is the session before this one.",
+  {
+    emoji: z
+      .string()
+      .describe(
+        "The ritual's emoji from rituals.md. The entry text starts with it.",
+      ),
+    name: z
+      .string()
+      .optional()
+      .describe("The ritual's name; used in the text of a new entry."),
+    text: z
+      .string()
+      .optional()
+      .describe(
+        'Optional entry text. Must start with the emoji. Defaults to "<emoji> <name>" for a new entry.',
+      ),
+    reflection: z
+      .string()
+      .optional()
+      .describe(
+        'The full current notes for this session (replaces the old notes).',
+      ),
+    windowHours: z
+      .number()
+      .optional()
+      .describe(
+        'How recently the newest entry must have changed to count as the same session (default 3).',
+      ),
+  },
+  async (args) =>
+    callInnernetAction('innernet_ritual', {
+      op: 'ritual',
+      emoji: args.emoji,
+      ...(args.name !== undefined ? { name: args.name } : {}),
+      ...(args.text !== undefined ? { text: args.text } : {}),
+      ...(args.reflection !== undefined ? { reflection: args.reflection } : {}),
+      ...(args.windowHours !== undefined
+        ? { windowHours: args.windowHours }
+        : {}),
+    }),
 );
 
 /**
