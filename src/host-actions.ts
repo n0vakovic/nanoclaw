@@ -467,11 +467,11 @@ function summarizeSessionLine(line: string, lineNumber: number): unknown {
 /* ------------------------------------------------------------------ */
 
 const INNERNET_BASE = 'https://api.innernet.znachilo.com';
-const INNERNET_RITUAL_DEFAULT_WINDOW_HOURS = 3;
-// Ritual lookups over-fetch, then keep only entries whose text starts with
-// the emoji: the server's q also matches inside reflections, so another
-// ritual's notes that mention this emoji would otherwise count as a match.
-const INNERNET_RITUAL_LOOKUP_LIMIT = 20;
+const RITUAL_TAG = 'ritual';
+const RITUAL_START_LOOKUP_LIMIT = 20;
+const RITUAL_HISTORY_DEFAULT_LIMIT = 20;
+const RITUAL_HISTORY_MAX_LIMIT = 100;
+const RITUAL_NOTES_PREVIEW_CHARS = 120;
 
 interface InnernetLog {
   id: number | string;
@@ -486,7 +486,7 @@ interface InnernetLog {
 
 let innernetClock: () => number = () => Date.now();
 
-/** Test hook: replace the clock used by the innernet action. */
+/** Test hook: replace the clock used by the innernet and ritual actions. */
 export function _setInnernetClockForTests(clock?: () => number): void {
   innernetClock = clock ?? (() => Date.now());
 }
@@ -503,6 +503,14 @@ function parseInnernetTime(value: unknown): number | null {
 /** Strip emoji variation selectors so "☕️" and "☕" compare equal. */
 function normalizeEmoji(value: string): string {
   return value.replace(/️/g, '');
+}
+
+function getInnernetToken(): string {
+  const token =
+    process.env.INNERNET_ADMIN_TOKEN ||
+    readEnvFile(['INNERNET_ADMIN_TOKEN']).INNERNET_ADMIN_TOKEN;
+  if (!token) throw new Error('INNERNET_ADMIN_TOKEN not set');
+  return token;
 }
 
 async function innernetRequest(
@@ -533,12 +541,12 @@ async function innernetRequest(
   }
 }
 
-function requireInnernetId(op: string, id: unknown): string {
+function requireInnernetId(label: string, id: unknown): string {
   if (
     (typeof id !== 'string' && typeof id !== 'number') ||
     String(id).trim() === ''
   ) {
-    throw new Error(`innernet ${op}: missing params.id`);
+    throw new Error(`${label}: missing params.id`);
   }
   return encodeURIComponent(String(id).trim());
 }
@@ -553,6 +561,70 @@ function validateInnernetVisibility(op: string, visibility: unknown): void {
       `innernet ${op}: invalid visibility "${String(visibility)}". Must be "public" or "private".`,
     );
   }
+}
+
+function hoursBetween(now: number, then: number | null): number | null {
+  if (then === null) return null;
+  return Math.round(((now - then) / 3_600_000) * 100) / 100;
+}
+
+/**
+ * Ritual sessions for an emoji, newest first. The server's q also matches
+ * inside reflections, so over-fetch and keep only entries whose text starts
+ * with the emoji; otherwise another ritual's notes mentioning this emoji
+ * would count as a session of it.
+ */
+async function findRitualSessions(
+  token: string,
+  emoji: string,
+  fetchLimit: number,
+): Promise<InnernetLog[]> {
+  const key = normalizeEmoji(emoji);
+  const query = new URLSearchParams({
+    q: key,
+    tag: RITUAL_TAG,
+    limit: String(fetchLimit),
+  });
+  const found = await innernetRequest(token, 'GET', `/logs?${query}`);
+  if (!Array.isArray(found)) {
+    throw new Error('ritual: expected an array from GET /logs');
+  }
+  return (found as InnernetLog[]).filter(
+    (log) =>
+      typeof log?.text === 'string' &&
+      normalizeEmoji(log.text.trimStart()).startsWith(key),
+  );
+}
+
+function hasRitualTag(tags: unknown): boolean {
+  return (
+    typeof tags === 'string' &&
+    tags.split(',').some((t) => t.trim() === RITUAL_TAG)
+  );
+}
+
+const EMOJI_GRAPHEME = /\p{Extended_Pictographic}|\p{Regional_Indicator}/u;
+
+/**
+ * The run of emoji at the start of `text` (ignoring leading whitespace),
+ * keeping ZWJ, skin-tone and variation-selector sequences whole. Returns ''
+ * when the text does not start with an emoji.
+ */
+export function leadingEmojiRun(text: string): string {
+  const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+  let run = '';
+  for (const { segment } of segmenter.segment(text.trimStart())) {
+    if (!EMOJI_GRAPHEME.test(segment)) break;
+    run += segment;
+  }
+  return run;
+}
+
+function requireRitualEmoji(op: string, emoji: unknown): string {
+  if (typeof emoji !== 'string' || emoji.trim() === '') {
+    throw new Error(`ritual ${op}: missing params.emoji`);
+  }
+  return emoji.trim();
 }
 
 let backgroundJobAction: ActionHandler | undefined;
@@ -1638,10 +1710,10 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
   },
 
   /**
-   * Read, write, and track rituals in Milan's personal innernet log.
+   * Read and write Milan's personal innernet log.
    * Requires INNERNET_ADMIN_TOKEN env var on the host.
    *
-   * params.op: "read" | "get" | "log" | "update" | "ritual"
+   * params.op: "read" | "get" | "log" | "update"
    * For "read" (all optional, passed through as query params):
    *   params.q: case-insensitive substring of text or reflection (emoji ok)
    *   params.tag: exact tag
@@ -1657,20 +1729,9 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
    * For "update" (replaces the given fields; at least one required):
    *   params.id: entry id
    *   params.text / params.reflection / params.tags / params.visibility
-   * For "ritual" (find-or-create the current session for a ritual emoji):
-   *   params.emoji: required
-   *   params.name: optional, used in the text of a new entry
-   *   params.text / params.reflection: optional; written to the entry
-   *   params.windowHours: default 3. The newest ritual entry for the emoji
-   *     continues if it was updated within this window, otherwise a new
-   *     private entry tagged "ritual" is created.
-   *   Returns { id, created, entry, previous, hoursSincePrevious }.
    */
   innernet: async (params) => {
-    const token =
-      process.env.INNERNET_ADMIN_TOKEN ||
-      readEnvFile(['INNERNET_ADMIN_TOKEN']).INNERNET_ADMIN_TOKEN;
-    if (!token) throw new Error('INNERNET_ADMIN_TOKEN not set');
+    const token = getInnernetToken();
 
     const {
       op,
@@ -1684,9 +1745,6 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
       tag,
       since,
       until,
-      emoji,
-      name,
-      windowHours,
     } = (params || {}) as {
       op?: string;
       id?: number | string;
@@ -1699,9 +1757,6 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
       tag?: string;
       since?: string;
       until?: string;
-      emoji?: string;
-      name?: string;
-      windowHours?: number;
     };
 
     if (!op) throw new Error('innernet: missing params.op');
@@ -1728,7 +1783,7 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
       }
 
       case 'get': {
-        const safeId = requireInnernetId(op, id);
+        const safeId = requireInnernetId(`innernet ${op}`, id);
         const entry = await innernetRequest(token, 'GET', `/logs/${safeId}`);
         logger.info({ op, id }, 'innernet completed');
         return JSON.stringify(entry);
@@ -1780,7 +1835,7 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
       }
 
       case 'update': {
-        const safeId = requireInnernetId(op, id);
+        const safeId = requireInnernetId(`innernet ${op}`, id);
         validateInnernetVisibility(op, visibility);
         const fields: Record<string, string> = {};
         if (text !== undefined) {
@@ -1810,128 +1865,172 @@ const ACTION_REGISTRY: Record<string, ActionHandler> = {
         return JSON.stringify(entry);
       }
 
-      case 'ritual': {
-        if (typeof emoji !== 'string' || emoji.trim() === '') {
-          throw new Error('innernet ritual: missing params.emoji');
+      default:
+        throw new Error(
+          `innernet: unknown op "${op}". Valid: read, get, log, update`,
+        );
+    }
+  },
+
+  /**
+   * Ritual sessions in Milan's innernet log. A session is a private entry
+   * tagged "ritual" whose text is just the ritual's emoji; everything else
+   * lives in its reflection ("notes"). Requires INNERNET_ADMIN_TOKEN.
+   *
+   * params.op: "start" | "notes" | "history"
+   * For "start" (always creates a new session):
+   *   params.emoji: required
+   *   params.notes: optional initial notes
+   *   Returns { id, entry, previous, hoursSincePrevious }.
+   * For "notes" (replaces the notes of a ritual entry):
+   *   params.id: entry id; the entry must carry the "ritual" tag
+   *   params.notes: the full new notes (string, may be empty)
+   *   If the entry text has words after its leading emoji, the text is
+   *   trimmed back to the emoji. Returns the updated entry.
+   * For "history":
+   *   params.emoji: required
+   *   params.limit: default 20, max 100
+   *   Returns { emoji, count, last, hoursSinceLast, sessions } newest first.
+   */
+  ritual: async (params) => {
+    const token = getInnernetToken();
+    const { op, emoji, notes, id, limit } = (params || {}) as {
+      op?: string;
+      emoji?: string;
+      notes?: unknown;
+      id?: number | string;
+      limit?: number;
+    };
+    if (!op) throw new Error('ritual: missing params.op');
+    const now = innernetClock();
+
+    switch (op) {
+      case 'start': {
+        const ritualEmoji = requireRitualEmoji(op, emoji);
+        if (notes !== undefined && typeof notes !== 'string') {
+          throw new Error('ritual start: params.notes must be a string');
         }
-        const window = windowHours ?? INNERNET_RITUAL_DEFAULT_WINDOW_HOURS;
-        if (typeof window !== 'number' || !(window > 0)) {
+        const sessions = await findRitualSessions(
+          token,
+          ritualEmoji,
+          RITUAL_START_LOOKUP_LIMIT,
+        );
+        const previous = sessions[0];
+        const created = (await innernetRequest(token, 'POST', '/log', {
+          text: ritualEmoji,
+          tags: RITUAL_TAG,
+          reflection: notes ?? '',
+          visibility: 'private',
+          timestamp: new Date(now).toISOString(),
+        })) as { id?: number | string } | null;
+        if (created?.id === undefined || created.id === null) {
           throw new Error(
-            'innernet ritual: params.windowHours must be a positive number',
+            `ritual start: POST /log returned no id: ${JSON.stringify(created)}`,
           );
         }
-        const rawEmoji = emoji.trim();
-        const key = normalizeEmoji(rawEmoji);
-        const now = innernetClock();
-
-        const query = new URLSearchParams({
-          q: key,
-          tag: 'ritual',
-          limit: String(INNERNET_RITUAL_LOOKUP_LIMIT),
-        });
-        const found = await innernetRequest(
+        const entry = await innernetRequest(
           token,
           'GET',
-          `/logs?${query.toString()}`,
+          `/logs/${encodeURIComponent(String(created.id))}`,
         );
-        if (!Array.isArray(found)) {
-          throw new Error('innernet ritual: expected an array from GET /logs');
-        }
-        const matches = (found as InnernetLog[]).filter(
-          (log) =>
-            typeof log?.text === 'string' &&
-            normalizeEmoji(log.text.trimStart()).startsWith(key),
+        const hoursSincePrevious = previous
+          ? hoursBetween(now, parseInnernetTime(previous.timestamp))
+          : null;
+        logger.info(
+          { op, id: created.id, hoursSincePrevious },
+          'ritual completed',
         );
-
-        const newest = matches[0];
-        const newestActivity = newest
-          ? (parseInnernetTime(newest.updated_at) ??
-            parseInnernetTime(newest.timestamp))
-          : null;
-        const continuing =
-          newest !== undefined &&
-          newestActivity !== null &&
-          now - newestActivity < window * 3_600_000;
-
-        let entry: unknown;
-        let entryId: number | string;
-        let previousLog: InnernetLog | undefined;
-
-        if (continuing) {
-          previousLog = matches[1];
-          entryId = newest.id;
-          const fields: Record<string, string> = {};
-          if (text !== undefined && text !== '') fields.text = text;
-          if (reflection !== undefined) fields.reflection = reflection;
-          entry =
-            Object.keys(fields).length > 0
-              ? await innernetRequest(
-                  token,
-                  'PUT',
-                  `/logs/${encodeURIComponent(String(newest.id))}`,
-                  fields,
-                )
-              : newest;
-        } else {
-          previousLog = newest;
-          const entryText =
-            text !== undefined && text !== ''
-              ? text
-              : `${rawEmoji} ${name ?? ''}`.trim();
-          const created = (await innernetRequest(token, 'POST', '/log', {
-            text: entryText,
-            tags: 'ritual',
-            reflection: reflection ?? '',
-            visibility: 'private',
-            timestamp: new Date(now).toISOString(),
-          })) as { id?: number | string };
-          if (created?.id === undefined || created.id === null) {
-            throw new Error(
-              `innernet ritual: POST /log returned no id: ${JSON.stringify(created)}`,
-            );
-          }
-          entryId = created.id;
-          entry = await innernetRequest(
-            token,
-            'GET',
-            `/logs/${encodeURIComponent(String(created.id))}`,
-          );
-        }
-
-        const previousStart = previousLog
-          ? parseInnernetTime(previousLog.timestamp)
-          : null;
-        const result = {
-          id: entryId,
-          created: !continuing,
+        return JSON.stringify({
+          id: created.id,
           entry,
-          previous: previousLog
+          previous: previous
             ? {
-                id: previousLog.id,
-                timestamp: previousLog.timestamp ?? null,
-                updated_at: previousLog.updated_at ?? null,
+                id: previous.id,
+                timestamp: previous.timestamp ?? null,
+                updated_at: previous.updated_at ?? null,
               }
             : null,
-          hoursSincePrevious:
-            previousStart !== null
-              ? Math.round(((now - previousStart) / 3_600_000) * 100) / 100
-              : null,
-        };
-        logger.info(
-          {
-            op,
-            id: entryId,
-            created: result.created,
-            hoursSincePrevious: result.hoursSincePrevious,
-          },
-          'innernet completed',
+          hoursSincePrevious,
+        });
+      }
+
+      case 'notes': {
+        const safeId = requireInnernetId('ritual notes', id);
+        if (typeof notes !== 'string') {
+          throw new Error('ritual notes: params.notes must be a string');
+        }
+        const current = (await innernetRequest(
+          token,
+          'GET',
+          `/logs/${safeId}`,
+        )) as InnernetLog | null;
+        if (!current || !hasRitualTag(current.tags)) {
+          throw new Error(
+            `ritual notes: entry ${String(id)} is not tagged "${RITUAL_TAG}"; use innernet_update for other entries`,
+          );
+        }
+        const fields: Record<string, string> = { reflection: notes };
+        const currentText =
+          typeof current.text === 'string' ? current.text : '';
+        const emojiRun = leadingEmojiRun(currentText);
+        if (emojiRun && currentText !== emojiRun) fields.text = emojiRun;
+        const entry = await innernetRequest(
+          token,
+          'PUT',
+          `/logs/${safeId}`,
+          fields,
         );
+        logger.info(
+          { op, id, notesChars: notes.length, healedText: !!fields.text },
+          'ritual completed',
+        );
+        return JSON.stringify(entry);
+      }
+
+      case 'history': {
+        const ritualEmoji = requireRitualEmoji(op, emoji);
+        const requested = limit ?? RITUAL_HISTORY_DEFAULT_LIMIT;
+        if (
+          typeof requested !== 'number' ||
+          !Number.isInteger(requested) ||
+          requested < 1
+        ) {
+          throw new Error(
+            'ritual history: params.limit must be a positive integer',
+          );
+        }
+        const effectiveLimit = Math.min(requested, RITUAL_HISTORY_MAX_LIMIT);
+        const sessions = (
+          await findRitualSessions(token, ritualEmoji, RITUAL_HISTORY_MAX_LIMIT)
+        ).slice(0, effectiveLimit);
+        const last = sessions[0];
+        const result = {
+          emoji: ritualEmoji,
+          count: sessions.length,
+          last: last
+            ? { id: last.id, timestamp: last.timestamp ?? null }
+            : null,
+          hoursSinceLast: last
+            ? hoursBetween(now, parseInnernetTime(last.timestamp))
+            : null,
+          sessions: sessions.map((s) => ({
+            id: s.id,
+            timestamp: s.timestamp ?? null,
+            updated_at: s.updated_at ?? null,
+            notesPreview: Array.from(
+              typeof s.reflection === 'string' ? s.reflection : '',
+            )
+              .slice(0, RITUAL_NOTES_PREVIEW_CHARS)
+              .join(''),
+          })),
+        };
+        logger.info({ op, count: result.count }, 'ritual completed');
         return JSON.stringify(result);
       }
 
       default:
         throw new Error(
-          `innernet: unknown op "${op}". Valid: read, get, log, update, ritual`,
+          `ritual: unknown op "${op}". Valid: start, notes, history`,
         );
     }
   },

@@ -79,18 +79,21 @@ function log(
   };
 }
 
-async function run(params: Record<string, unknown>) {
+async function run(params: Record<string, unknown>, action = 'innernet') {
   return dispatchAction(
-    { type: 'action', action: 'innernet', requestId: 'r1', params } as never,
-    { sourceGroup: 'telegram_main', groupIpcDir: '/tmp/ipc', isMain: true },
+    { type: 'action', action, requestId: 'r1', params } as never,
+    { sourceGroup: 'telegram_other', groupIpcDir: '/tmp/ipc', isMain: false },
   );
 }
 
-async function runOk(params: Record<string, unknown>) {
-  const res = await run(params);
+async function runOk(params: Record<string, unknown>, action = 'innernet') {
+  const res = await run(params, action);
   if (!res.ok) throw new Error(`action failed: ${res.output}`);
   return JSON.parse(res.output);
 }
+
+const ritual = (params: Record<string, unknown>) => run(params, 'ritual');
+const ritualOk = (params: Record<string, unknown>) => runOk(params, 'ritual');
 
 beforeEach(() => {
   calls = [];
@@ -223,185 +226,269 @@ describe('innernet update', () => {
   });
 });
 
-describe('innernet ritual', () => {
-  function lookup(results: unknown[]): void {
-    route(
-      'GET',
-      (u) => u.pathname === '/logs',
-      () => json(results),
-    );
-  }
+describe('innernet no longer has a ritual op', () => {
+  it('rejects op ritual', async () => {
+    const res = await run({ op: 'ritual', emoji: '🧘' });
+    expect(res.ok).toBe(false);
+    expect(res.output).toContain('unknown op "ritual"');
+    expect(calls).toHaveLength(0);
+  });
+});
 
-  function acceptCreate(id = 100): void {
-    route(
-      'POST',
-      (u) => u.pathname === '/log',
-      () => json({ status: 'ok', id }, 201),
-    );
-    route(
-      'GET',
-      (u) => u.pathname === `/logs/${id}`,
-      () => {
-        const post = calls.find((c) => c.method === 'POST')!;
-        return json({ id, ...(post.body as object), updated_at: iso(NOW) });
-      },
-    );
-  }
+function lookup(results: unknown[]): void {
+  route(
+    'GET',
+    (u) => u.pathname === '/logs',
+    () => json(results),
+  );
+}
 
-  it('queries by emoji with the ritual tag', async () => {
+function acceptCreate(id = 100): void {
+  route(
+    'POST',
+    (u) => u.pathname === '/log',
+    () => json({ status: 'ok', id }, 201),
+  );
+  route(
+    'GET',
+    (u) => u.pathname === `/logs/${id}`,
+    () => {
+      const post = calls.filter((c) => c.method === 'POST').at(-1)!;
+      return json({ id, ...(post.body as object), updated_at: iso(NOW) });
+    },
+  );
+}
+
+describe('ritual start', () => {
+  it('creates a private ritual entry whose text is exactly the emoji', async () => {
     lookup([]);
-    acceptCreate();
-    await runOk({ op: 'ritual', emoji: '🧘' });
+    acceptCreate(100);
+    const out = await ritualOk({ op: 'start', emoji: ' 🧘 ', notes: 'calm' });
     const url = new URL(calls[0].url);
     expect(url.pathname).toBe('/logs');
     expect(url.searchParams.get('q')).toBe('🧘');
     expect(url.searchParams.get('tag')).toBe('ritual');
-  });
-
-  it('creates a private ritual entry when none exists', async () => {
-    lookup([]);
-    acceptCreate(100);
-    const out = await runOk({
-      op: 'ritual',
-      emoji: '🧘',
-      name: 'morning sit',
-      reflection: 'calm',
-    });
     const post = calls.find((c) => c.method === 'POST')!;
     expect(post.url).toBe(`${BASE}/log`);
     expect(post.body).toEqual({
-      text: '🧘 morning sit',
+      text: '🧘',
       tags: 'ritual',
       reflection: 'calm',
       visibility: 'private',
       timestamp: iso(NOW),
     });
     expect(out.id).toBe(100);
-    expect(out.created).toBe(true);
     expect(out.entry.id).toBe(100);
     expect(out.previous).toBeNull();
     expect(out.hoursSincePrevious).toBeNull();
   });
 
-  it('uses just the emoji as text when no name is given', async () => {
+  it('defaults notes to empty', async () => {
     lookup([]);
     acceptCreate();
-    await runOk({ op: 'ritual', emoji: '🧘' });
+    await ritualOk({ op: 'start', emoji: '🧘' });
     const post = calls.find((c) => c.method === 'POST')!;
-    expect((post.body as { text: string }).text).toBe('🧘');
+    expect((post.body as { reflection: string }).reflection).toBe('');
   });
 
-  it('continues the newest entry inside the window and replaces notes', async () => {
-    const current = log(5, '🧘 sit', iso(NOW - 2 * HOUR), iso(NOW - 1 * HOUR));
-    const older = log(4, '🧘 sit', iso(NOW - 26 * HOUR), iso(NOW - 25 * HOUR));
-    lookup([current, older]);
-    route(
-      'PUT',
-      (u) => u.pathname === '/logs/5',
-      (call) => json({ ...current, ...(call.body as object) }),
-    );
-    const out = await runOk({
-      op: 'ritual',
-      emoji: '🧘',
-      reflection: 'full notes v2',
-    });
-    expect(calls.some((c) => c.method === 'POST')).toBe(false);
-    const put = calls.find((c) => c.method === 'PUT')!;
-    expect(put.body).toEqual({ reflection: 'full notes v2' });
-    expect(out.id).toBe(5);
-    expect(out.created).toBe(false);
-    expect(out.entry.reflection).toBe('full notes v2');
-    expect(out.previous).toEqual({
-      id: 4,
-      timestamp: older.timestamp,
-      updated_at: older.updated_at,
-    });
-    expect(out.hoursSincePrevious).toBe(26);
-  });
-
-  it('continues without writing when no notes are given', async () => {
-    const current = log(5, '🧘', iso(NOW - HOUR), iso(NOW - HOUR));
-    lookup([current]);
-    const out = await runOk({ op: 'ritual', emoji: '🧘' });
-    expect(calls).toHaveLength(1);
-    expect(out.created).toBe(false);
-    expect(out.entry).toEqual(current);
-    expect(out.previous).toBeNull();
-    expect(out.hoursSincePrevious).toBeNull();
-  });
-
-  it('measures the window from updated_at, not timestamp', async () => {
-    // Started 10h ago but touched 30 min ago: still the current session.
-    const current = log(5, '🧘', iso(NOW - 10 * HOUR), iso(NOW - HOUR / 2));
-    lookup([current]);
-    const out = await runOk({ op: 'ritual', emoji: '🧘' });
-    expect(out.created).toBe(false);
-  });
-
-  it('creates a new entry once the window has passed', async () => {
-    const last = log(5, '🧘 sit', iso(NOW - 30 * HOUR), iso(NOW - 4 * HOUR));
-    lookup([last]);
+  it('creates a new entry every time, even right after a previous one', async () => {
+    const justNow = log(5, '🧘', iso(NOW - 60_000), iso(NOW - 60_000));
+    lookup([justNow]);
     acceptCreate(6);
-    const out = await runOk({ op: 'ritual', emoji: '🧘', name: 'sit' });
-    expect(out.created).toBe(true);
+    const out = await ritualOk({ op: 'start', emoji: '🧘' });
+    expect(calls.filter((c) => c.method === 'POST')).toHaveLength(1);
+    expect(calls.some((c) => c.method === 'PUT')).toBe(false);
     expect(out.id).toBe(6);
     expect(out.previous).toEqual({
       id: 5,
-      timestamp: last.timestamp,
-      updated_at: last.updated_at,
+      timestamp: justNow.timestamp,
+      updated_at: justNow.updated_at,
     });
-    expect(out.hoursSincePrevious).toBe(30);
   });
 
-  it('honours a custom windowHours', async () => {
-    const last = log(5, '🧘', iso(NOW - 2 * HOUR), iso(NOW - 2 * HOUR));
-    lookup([last]);
+  it('reports the previous session and hours since it started', async () => {
+    // updated_at is ignored for the gap; timestamp is when it happened.
+    const prev = log(5, '🧘', iso(NOW - 26.5 * HOUR), iso(NOW - 2 * HOUR));
+    const older = log(4, '🧘', iso(NOW - 50 * HOUR), iso(NOW - 50 * HOUR));
+    lookup([prev, older]);
     acceptCreate(6);
-    const out = await runOk({ op: 'ritual', emoji: '🧘', windowHours: 1 });
-    expect(out.created).toBe(true);
+    const out = await ritualOk({ op: 'start', emoji: '🧘' });
+    expect(out.previous.id).toBe(5);
+    expect(out.hoursSincePrevious).toBe(26.5);
   });
 
-  it('falls back to a naive timestamp (as UTC) when updated_at is missing', async () => {
-    // Naive "2026-11-08T10:30:00" is 1.5h before NOW in UTC.
-    const current = log(5, '🧘', '2026-11-08T10:30:00');
-    lookup([current]);
-    const out = await runOk({ op: 'ritual', emoji: '🧘' });
-    expect(out.created).toBe(false);
-
-    calls = [];
-    routes = [];
-    const stale = log(5, '🧘', '2026-11-08T08:30:00');
-    lookup([stale]);
+  it('reads naive timestamps as UTC', async () => {
+    lookup([log(5, '🧘', '2026-11-08T08:30:00')]);
     acceptCreate(6);
-    const out2 = await runOk({ op: 'ritual', emoji: '🧘' });
-    expect(out2.created).toBe(true);
-    expect(out2.hoursSincePrevious).toBe(3.5);
+    const out = await ritualOk({ op: 'start', emoji: '🧘' });
+    expect(out.hoursSincePrevious).toBe(3.5);
   });
 
   it('ignores matches whose text does not start with the emoji', async () => {
-    // q also matches reflections: another ritual mentioning ☕ is not a ☕ session.
-    const other = log(9, '🧘 sit', iso(NOW - HOUR), iso(NOW - HOUR), {
+    const other = log(9, '🧘', iso(NOW - HOUR), iso(NOW - HOUR), {
       reflection: 'then ☕ after',
     });
     lookup([other]);
     acceptCreate(10);
-    const out = await runOk({ op: 'ritual', emoji: '☕' });
-    expect(out.created).toBe(true);
+    const out = await ritualOk({ op: 'start', emoji: '☕' });
     expect(out.previous).toBeNull();
   });
 
   it('treats emoji with and without a variation selector as the same', async () => {
-    const current = log(5, '☕️ coffee', iso(NOW - HOUR), iso(NOW - HOUR));
-    lookup([current]);
-    const out = await runOk({ op: 'ritual', emoji: '☕' });
-    expect(out.created).toBe(false);
+    lookup([log(5, '☕️', iso(NOW - 2 * HOUR), iso(NOW - 2 * HOUR))]);
+    acceptCreate(6);
+    const out = await ritualOk({ op: 'start', emoji: '☕️' });
     expect(new URL(calls[0].url).searchParams.get('q')).toBe('☕');
+    expect(out.previous.id).toBe(5);
+    const post = calls.find((c) => c.method === 'POST')!;
+    expect((post.body as { text: string }).text).toBe('☕️');
   });
 
   it('requires an emoji', async () => {
-    const res = await run({ op: 'ritual', name: 'sit' });
+    const res = await ritual({ op: 'start' });
     expect(res.ok).toBe(false);
     expect(res.output).toContain('missing params.emoji');
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe('ritual notes', () => {
+  function entry(id: number, text: string, tags = 'ritual') {
+    route(
+      'GET',
+      (u) => u.pathname === `/logs/${id}`,
+      () => json({ ...log(id, text, iso(NOW - HOUR)), tags }),
+    );
+    route(
+      'PUT',
+      (u) => u.pathname === `/logs/${id}`,
+      (call) =>
+        json({ ...log(id, text, iso(NOW - HOUR)), ...(call.body as object) }),
+    );
+  }
+
+  const putBody = () => calls.find((c) => c.method === 'PUT')!.body;
+
+  it('replaces the notes', async () => {
+    entry(7, '🧘');
+    const out = await ritualOk({ op: 'notes', id: 7, notes: 'full notes v2' });
+    expect(putBody()).toEqual({ reflection: 'full notes v2' });
+    expect(out.reflection).toBe('full notes v2');
+  });
+
+  it('allows empty notes', async () => {
+    entry(7, '🧘');
+    await ritualOk({ op: 'notes', id: 7, notes: '' });
+    expect(putBody()).toEqual({ reflection: '' });
+  });
+
+  it('accepts ritual among several tags', async () => {
+    entry(7, '🧘', 'morning, ritual');
+    await ritualOk({ op: 'notes', id: 7, notes: 'x' });
+    expect(putBody()).toEqual({ reflection: 'x' });
+  });
+
+  it('refuses an entry without the ritual tag', async () => {
+    entry(7, '🧘 yoga', 'rituals,yoga');
+    const res = await ritual({ op: 'notes', id: 7, notes: 'x' });
+    expect(res.ok).toBe(false);
+    expect(res.output).toContain('not tagged "ritual"');
+    expect(calls.some((c) => c.method === 'PUT')).toBe(false);
+  });
+
+  it('trims "emoji + words" text back to the emoji', async () => {
+    entry(7, '🧘 morning sit');
+    await ritualOk({ op: 'notes', id: 7, notes: 'n' });
+    expect(putBody()).toEqual({ reflection: 'n', text: '🧘' });
+  });
+
+  it('keeps a ZWJ emoji whole', async () => {
+    entry(7, '🧘🏽‍♂️ sit with skin tone');
+    await ritualOk({ op: 'notes', id: 7, notes: 'n' });
+    expect(putBody()).toEqual({ reflection: 'n', text: '🧘🏽‍♂️' });
+  });
+
+  it('keeps a run of several leading emoji together', async () => {
+    entry(7, '❤️🙏✨ gratitude and aliveness');
+    await ritualOk({ op: 'notes', id: 7, notes: 'n' });
+    expect(putBody()).toEqual({ reflection: 'n', text: '❤️🙏✨' });
+  });
+
+  it('leaves text without a leading emoji alone', async () => {
+    entry(7, 'gratitude 🙏');
+    await ritualOk({ op: 'notes', id: 7, notes: 'n' });
+    expect(putBody()).toEqual({ reflection: 'n' });
+  });
+
+  it('requires an id and string notes', async () => {
+    const noId = await ritual({ op: 'notes', notes: 'x' });
+    expect(noId.ok).toBe(false);
+    expect(noId.output).toContain('missing params.id');
+    const noNotes = await ritual({ op: 'notes', id: 7 });
+    expect(noNotes.ok).toBe(false);
+    expect(noNotes.output).toContain('notes must be a string');
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe('ritual history', () => {
+  it('lists sessions for the emoji, newest first, filtered by starts-with', async () => {
+    const a = log(9, '🧘', iso(NOW - 5 * HOUR), iso(NOW - 4 * HOUR), {
+      reflection: 'x'.repeat(200),
+    });
+    const notMine = log(8, '☕', iso(NOW - 6 * HOUR), iso(NOW - 6 * HOUR), {
+      reflection: 'after 🧘',
+    });
+    const b = log(7, '🧘', '2026-11-06T12:00:00');
+    lookup([a, notMine, b]);
+    const out = await ritualOk({ op: 'history', emoji: '🧘' });
+    const url = new URL(calls[0].url);
+    expect(url.searchParams.get('q')).toBe('🧘');
+    expect(url.searchParams.get('tag')).toBe('ritual');
+    expect(out.emoji).toBe('🧘');
+    expect(out.count).toBe(2);
+    expect(out.last).toEqual({ id: 9, timestamp: a.timestamp });
+    expect(out.hoursSinceLast).toBe(5);
+    expect(out.sessions.map((s: { id: number }) => s.id)).toEqual([9, 7]);
+    expect(out.sessions[0].notesPreview).toHaveLength(120);
+    expect(out.sessions[1]).toEqual({
+      id: 7,
+      timestamp: '2026-11-06T12:00:00',
+      updated_at: null,
+      notesPreview: '',
+    });
+  });
+
+  it('applies the limit after filtering and caps it at 100', async () => {
+    lookup([
+      log(3, '🧘', iso(NOW - HOUR)),
+      log(2, '🧘', iso(NOW - 2 * HOUR)),
+      log(1, '🧘', iso(NOW - 3 * HOUR)),
+    ]);
+    const out = await ritualOk({ op: 'history', emoji: '🧘', limit: 2 });
+    expect(out.count).toBe(2);
+    expect(out.sessions.map((s: { id: number }) => s.id)).toEqual([3, 2]);
+
+    calls = [];
+    await ritualOk({ op: 'history', emoji: '🧘', limit: 500 });
+    expect(new URL(calls[0].url).searchParams.get('limit')).toBe('100');
+  });
+
+  it('returns empty history when there are no sessions', async () => {
+    lookup([]);
+    const out = await ritualOk({ op: 'history', emoji: '🧘' });
+    expect(out).toEqual({
+      emoji: '🧘',
+      count: 0,
+      last: null,
+      hoursSinceLast: null,
+      sessions: [],
+    });
+  });
+
+  it('rejects a bad limit', async () => {
+    const res = await ritual({ op: 'history', emoji: '🧘', limit: 0 });
+    expect(res.ok).toBe(false);
+    expect(res.output).toContain('positive integer');
   });
 });
